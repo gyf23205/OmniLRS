@@ -79,12 +79,27 @@ class Yamcs_SimulationManager:
         self._step_world_and_reset()
 
     def _start_TMTC(self):
-        robot_name = self.RM.robot.robot_name.replace("/","") 
+        robot_name = self.RM.robot.robot_name.replace("/","")
         controller_name = self.RM.RM_conf.robot_controller
+        self.drive_controller = None
 
         if controller_name == "pragyaan-controller":
             from src.mission_specific.pragyaan.tmtc.pragyaan_controller import PragyaanController
             self.TMTC = PragyaanController(self.cfg["mode"]["instance_conf"], self.RM.RM_conf.yamcs_tmtc, robot_name, self.RM.robot_RG, self.RM.robot)
+        elif controller_name == "perseverance-controller":
+            from src.mission_specific.perseverance.control.drive_controller import PerseveranceDriveController
+            from src.mission_specific.perseverance.control.ackermann_model import AckermannModel, RoverGeometry
+            from src.mission_specific.perseverance.tmtc.perseverance_controller import PerseveranceController
+
+            params = self.RM.RM_conf.parameters
+            ackermann = AckermannModel(RoverGeometry.from_config(params.geometry, params.scale))
+            self.drive_controller = PerseveranceDriveController(
+                self.RM.robot, self.RM.robot_RG, ackermann, params.drive_control
+            )
+            self.TMTC = PerseveranceController(
+                self.cfg["mode"]["instance_conf"], self.RM.RM_conf.yamcs_tmtc,
+                robot_name, self.RM.robot_RG, self.RM.robot, self.drive_controller,
+            )
         elif controller_name == "":
             raise Exception("No robot controller was setup in yaml configurations.")
         else: 
@@ -154,6 +169,10 @@ class Yamcs_SimulationManager:
             if self.world.is_playing():
                 if self.world.current_time_step_index == 0:
                     self.world.reset()
+                # Tick the onboard drive controller at the physics rate. Commands from Yamcs are
+                # goals; this is what closes the loop on measured pose and drives the wheels.
+                if self.drive_controller is not None:
+                    self.drive_controller.update()
             self.rate.sleep()
         self.world.stop()
         self.timeline.stop()

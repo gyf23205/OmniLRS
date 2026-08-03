@@ -1,0 +1,84 @@
+# @package environment
+# do not remove the above comment, it injects the settings below into the environment config
+
+robots_settings:
+  # NOTE: robots_root is /World rather than the usual /Robots on purpose. The joints inside
+  # rover_with_sensors.usd reference their bodies through absolute /World/perseverance/... paths,
+  # so the rover must land at exactly /World/perseverance or every joint breaks. Robot.robot_path
+  # is built as os.path.join(robots_root, robot_name).
+  robots_root: "/World"
+  parameters:
+    robot_name: perseverance
+    usd_path: my_files/rover_with_sensors.usd
+    # rover_with_sensors.usd declares no default prim, so the reference has to be targeted
+    # explicitly (see Robot.load).
+    usd_prim_path: "/World/perseverance"
+    scale: 0.35
+    pose:
+      position: [10., 10., 3.]
+      orientation: [1., 0., 0., 0.]
+    base_link: "body" # core link used to determine the position of the robot
+    target_links: [
+      "wheel_front_left",
+      "wheel_front_right",
+      "wheel_mid_left",
+      "wheel_mid_right",
+      "wheel_rear_left",
+      "wheel_rear_right"
+    ]
+    wheel_joints:
+      left: ["drive_joint_front_left", "drive_joint_mid_left", "drive_joint_rear_left"]
+      right: ["drive_joint_front_right", "drive_joint_mid_right", "drive_joint_rear_right"]
+    # Four steerable corners (the two mid wheels are fixed) - the real rocker-bogie layout.
+    # These are position drives in the usd (stiffness 500, damping 200), so they hold an angle.
+    # Their presence is what switches the rover from skid steering to Ackermann.
+    steer_joints: [
+      "steer_joint_front_left",
+      "steer_joint_front_right",
+      "steer_joint_rear_left",
+      "steer_joint_rear_right"
+    ]
+    # Measured from rover_with_sensors.usd, UNSCALED. RoverGeometry.from_config multiplies the
+    # lengths by `scale` above, so changing --scale cannot leave the controller working from
+    # stale dimensions. Offsets are relative to the mid axle; +x is left, +y is FORWARD.
+    #
+    # NOTE the longitudinal offsets are negated relative to the raw usd values. `--calibrate`
+    # showed the rover travels along usd -y, so the forward-positive body frame is (x, -y_usd)
+    # and the wheels the usd names "front" are the leading ones. With the raw usd signs the
+    # leading wheels steer away from the turn and the rover curves the wrong way.
+    geometry:
+      wheel_radius: 0.2625
+      corner_half_track: 1.062
+      mid_half_track: 1.184
+      front_offset: 1.185     # usd -1.185, negated into the forward-positive frame
+      rear_offset: -1.075     # usd +1.075, negated into the forward-positive frame
+      max_steer_angle_deg: 75.0
+      max_wheel_speed: 20.0     # rad/s at the drive joint; a rate, so never scaled
+    drive_control:
+      position_tolerance: 0.15        # m, goto arrival radius
+      distance_tolerance: 0.05        # m, drive_straight stopping accuracy
+      heading_tolerance_deg: 2.0
+      turn_first_threshold_deg: 90.0  # pivot instead of arcing beyond this heading error
+      steering_gain: 1.2              # curvature (1/m) per radian of heading error
+      max_curvature: 1.0              # 1/m, tightest commanded arc
+      default_speed: 0.3              # m/s used by goto
+      default_yaw_rate_deg: 15.0      # deg/s used by goto pivots
+      # Sign conventions measured by `--calibrate`: the rover moved 0.462 m with a projection of
+      # -0.413 onto body +y, so +y points aft and the heading has to be read off the negated
+      # forward vector. steer_sign +1 confirms commanded and measured steer angles agree.
+      forward_axis_sign: -1.0
+      steer_sign: 1.0
+    # dimensions feeds DriveHandler's skid-steer turn maths, which the Ackermann controller
+    # replaces. Kept accurate anyway: width is the measured mid-wheel track at scale 0.35.
+    dimensions:
+      width: 0.829 # m
+      length: 0.791
+    turn_speed_coef: 10.88  # 1 / wheel_radius at scale 0.35; unused on the Ackermann path
+    pos_relative_to_prim: ""
+    camera:
+      prim_path: "/World/perseverance/body/nav_cam"
+      resolutions:
+        low: [320, 240]
+        high: [1440, 1080]
+    imu_sensor_path: "/World/perseverance/body/imu"
+    solar_panel_joint: "" # the perseverance usd has no articulated solar panel

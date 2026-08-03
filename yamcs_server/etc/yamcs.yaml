@@ -1,0 +1,19 @@
+# System-wide Yamcs configuration for the OmniLRS ground station.
+services:
+  - class: org.yamcs.http.HttpServer
+
+instances:
+  - omnilrs
+
+dataDir: /storage/yamcs-data
+
+secretKey: "omnilrs-local-development-only"
+
+yamcs-web:
+  tag: "OmniLRS: perseverance"
+
+buckets:
+  - name: displays
+    path: displays
+  - name: stacks
+    path: stacks

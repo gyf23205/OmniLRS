@@ -275,7 +275,8 @@ class TerrainManager:
         self.update(update_collider=True)
 
     def deformTerrain(
-        self, world_positions: np.ndarray, world_orientations: np.ndarray, contact_forces: np.ndarray
+        self, world_positions: np.ndarray, world_orientations: np.ndarray, contact_forces: np.ndarray,
+        update_mesh: bool = True,
     ) -> None:
         """
         Deforms the terrain based on the given body transforms.
@@ -284,9 +285,17 @@ class TerrainManager:
             world_positions (np.ndarray): the world positions of the bodies.
             world_orientations (np.ndarray): the world orientations of the bodies.
             contact_forces (np.ndarray): the contact forces of the bodies.
+            update_mesh (bool): if False, accumulate DEM changes without uploading the mesh.
+                Call flushTerrainMesh() separately to push the accumulated DEM to USD.
         """
 
         self._DEM, self._mask = self._G.deform(world_positions, world_orientations, contact_forces)
+        if update_mesh:
+            self.update(update_collider=False)
+
+    def flushTerrainMesh(self) -> None:
+        """Push the current DEM to the USD mesh. Call this after one or more deformTerrain
+        calls made with update_mesh=False to amortise the USD upload cost."""
         self.update(update_collider=False)
 
     def loadTerrainByName(self, name: str) -> None:

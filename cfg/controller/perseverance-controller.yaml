@@ -1,0 +1,69 @@
+# @package environment
+# do not remove the above comment, it injects the below configs into environment configs
+
+robots_settings:
+  robot_controller: "perseverance-controller"
+  yamcs_tmtc: # these settings are relevant if Yamcs mode
+    mdb:
+      # NOTE: load perseverance.xml alone. MdbParsingService.load_mdb_registry raises on ambiguous
+      # wire names across files, and rover.xml declares commands with the same names.
+      - "cfg/mdb/perseverance.xml"
+    intervals:
+      # Downlink period in seconds. This is what makes telemetry low-rate: the physics loop runs at
+      # ~30 Hz, the rover state reaches the ground once per second.
+      robot_stats: 1
+    images:
+      # No image downlink for this rover. ImagesHandler is still constructed by YamcsTMTC, so the
+      # keys have to exist, but with no buckets it does nothing.
+      no_data_image_path: ""
+      buckets: []
+    parameters:
+      pose_of_base_link: "/Rover/pose_ground_truth"
+      imu_accelerometer: "/Rover/imu_accelerometer"
+      imu_gyroscope: "/Rover/imu_gyroscope"
+      imu_orientation: "/Rover/imu_orientation"
+      motor_encoder: "/Rover/motor_encoder"
+      contact_force_front_left: "/Rover/contact_force_front_left"
+      contact_force_front_right: "/Rover/contact_force_front_right"
+      contact_force_mid_left: "/Rover/contact_force_mid_left"
+      contact_force_mid_right: "/Rover/contact_force_mid_right"
+      contact_force_rear_left: "/Rover/contact_force_rear_left"
+      contact_force_rear_right: "/Rover/contact_force_rear_right"
+      battery_charge: "/Rover/battery_charge"
+      battery_voltage: "/Rover/battery_voltage"
+      total_current_in: "/Rover/total_current_in"
+      total_current_out: "/Rover/total_current_out"
+      net_power: "/Rover/net_power"
+      motor_current: "/Rover/motor_current"
+      current_draw_obc: "/Rover/current_draw_obc"
+      current_draw_motor_controller: "/Rover/current_draw_motor_controller"
+      current_draw_camera: "/Rover/current_draw_camera"
+      current_draw_radio: "/Rover/current_draw_radio"
+      current_draw_eps: "/Rover/current_draw_eps"
+      temperature_front: "/Rover/temperature_front"
+      temperature_back: "/Rover/temperature_back"
+      temperature_left: "/Rover/temperature_left"
+      temperature_right: "/Rover/temperature_right"
+      temperature_top: "/Rover/temperature_top"
+      temperature_bottom: "/Rover/temperature_bottom"
+      rssi: "/Rover/radio_rssi"
+      obc_state: "/Rover/obc_state"
+      obc_cpu_usage: "/Rover/obc_cpu_usage"
+      obc_ram_usage: "/Rover/obc_ram_usage"
+      obc_disk_usage: "/Rover/obc_disk_usage"
+      obc_uptime: "/Rover/obc_uptime"
+      go_nogo: "/Rover/go_nogo"
+      solar_panel_state: "/Rover/solar_panel_state"
+      active_command: "/Rover/active_command"
+      command_status: "/Rover/command_status"
+      command_distance_remaining: "/Rover/command_distance_remaining"
+      command_heading_error: "/Rover/command_heading_error"
+      command_target: "/Rover/command_target"
+    commands:
+      drive_straight: "/Rover/motor/drive_straight"
+      drive_turn: "/Rover/motor/drive_turn"
+      stop: "/Rover/motor/stop"
+      goto: "/Rover/motor/goto"
+      power_electronics: "/Rover/system/power_electronics"
+      solar_panel: "/Rover/system/deploy_solar_panel"
+      go_nogo: "/Rover/system/go_nogo"

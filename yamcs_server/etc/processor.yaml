@@ -1,0 +1,43 @@
+# Processor definitions. A processor is where TM/TC handling happens inside Yamcs.
+realtime:
+  services:
+    # No StreamTmPacketProvider: there is no TM packet stream, the rover pushes software
+    # parameters through the API instead. See the note in yamcs.omnilrs.yaml.
+    - class: org.yamcs.StreamTcCommandReleaser
+    - class: org.yamcs.tctm.StreamParameterProvider
+    - class: org.yamcs.algorithms.AlgorithmManager
+    # Required. Every perseverance telemetry parameter is declared dataSource="local" in the MDB
+    # (a "software parameter"), and LocalParameterManager is what accepts the
+    # processor.set_parameter_value() calls behind YamcsTMTC.transmit_to_yamcs.
+    - class: org.yamcs.parameter.LocalParameterManager
+  config:
+    generateEvents: true
+    subscribeAll: true
+    persistParameters: true
+    alarm:
+      parameterCheck: true
+      parameterServer: enabled
+      eventServer: enabled
+    recordInitialValues: true
+    # Without this the locally-set rover parameters would never reach the archive.
+    recordLocalValues: true
+
+# Step-by-step archive replay, driven from the web interface.
+Archive:
+  services:
+    - class: org.yamcs.tctm.ReplayService
+    - class: org.yamcs.algorithms.AlgorithmManager
+
+# Used by the ParameterArchive when rebuilding.
+ParameterArchive:
+  services:
+    - class: org.yamcs.tctm.ReplayService
+    - class: org.yamcs.algorithms.AlgorithmManager
+
+# Used for archive retrievals via replays.
+ArchiveRetrieval:
+  config:
+    subscribeContainerArchivePartitions: false
+  services:
+    - class: org.yamcs.tctm.ReplayService
+    - class: org.yamcs.algorithms.AlgorithmManager

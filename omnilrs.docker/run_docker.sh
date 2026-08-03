@@ -1,10 +1,11 @@
 #!/bin/bash
 xhost +
-docker run --name isaac-sim-omnilrs-container -it --gpus all -e "ACCEPT_EULA=Y" --rm --network=host --ipc=host \
+docker run --name isaac-sim-omnilrs-container -it --gpus all -e "ACCEPT_EULA=Y" --rm --network=host --ipc=host -v /home/yifan/git/space_robotics_gz_envs/assets/srb_assets/model/robot/perseverance:/workspace/omnilrs/assets/external \
 -v $HOME/.Xauthority:/root/.Xauthority \
 -e DISPLAY \
 -e "PRIVACY_CONSENT=Y" \
 -v ${PWD}:/workspace/omnilrs \
+-v ~/docker/isaac-sim/my_files:/workspace/omnilrs/my_files \
 -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \
 -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \
 -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \

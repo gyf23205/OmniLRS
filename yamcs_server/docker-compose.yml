@@ -1,0 +1,28 @@
+# Local Yamcs ground station for the perseverance rover.
+#
+#   docker compose up -d --build   # start, web UI at http://localhost:8090
+#   docker compose logs -f         # watch
+#   docker compose down            # stop
+#
+# network_mode: host is required, not cosmetic. The simulator runs in its own container which
+# omnilrs.docker/run_docker.sh also starts with --network=host, and the two talk over loopback:
+#   - the simulator's yamcs-client reaches this server on localhost:8090
+#   - this server's tc-udp link reaches the simulator's CommandsHandler on 127.0.0.1:10025
+#
+# The build context is the repository root so the image can pick up cfg/mdb/perseverance.xml,
+# keeping that file the single source of truth shared by Yamcs and MdbParsingService. Rerun with
+# --build after regenerating the MDB.
+services:
+  yamcs:
+    build:
+      context: ..
+      dockerfile: yamcs_server/Dockerfile
+    image: omnilrs/yamcs:latest
+    container_name: omnilrs-yamcs
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - yamcs-data:/storage/yamcs-data
+
+volumes:
+  yamcs-data:

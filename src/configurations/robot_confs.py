@@ -32,6 +32,14 @@ class RobotParameters:
     dimensions: dict = field(default_factory=dict)
     turn_speed_coef: float = 1
     solar_panel_joint: str = field(default_factory=str)
+    scale: float = 1.0
+    usd_prim_path: str = field(default_factory=str)
+    # Corner steer joints, for robots that steer rather than skid. Empty means skid steering.
+    steer_joints: List[str] = field(default_factory=list)
+    # Rover dimensions in unscaled usd units, consumed by the Ackermann model. Scaled by `scale`.
+    geometry: Dict = field(default_factory=dict)
+    # Closed-loop drive controller gains and tolerances.
+    drive_control: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.usd_path = os.path.join(os.getcwd(), self.usd_path)

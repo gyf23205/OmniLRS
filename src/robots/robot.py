@@ -21,9 +21,9 @@ import omni.graph.core as og
 from isaacsim.core.utils.rotations import quat_to_rot_matrix
 from omni.isaac.dynamic_control import _dynamic_control
 from isaacsim.core.prims import SingleRigidPrim, SingleXFormPrim, RigidPrim
-from pxr import Gf, Usd
+from pxr import Gf, Sdf, Usd, UsdGeom
 
-from WorldBuilders.pxr_utils import createXform, createObject
+from WorldBuilders.pxr_utils import addDefaultOps, createXform, createObject, setDefaultOpsTyped
 from src.configurations.robot_confs import RobotManagerConf
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -90,6 +90,9 @@ class RobotManager:
             self.robot_parameters.turn_speed_coef,
             self.robot_parameters.pos_relative_to_prim,
             self.robot_parameters.solar_panel_joint,
+            self.robot_parameters.scale,
+            self.robot_parameters.usd_prim_path,
+            self.robot_parameters.steer_joints,
         )
         self.add_RRG(
             self.robot_parameters.robot_name,
@@ -124,6 +127,9 @@ class RobotManager:
             self.robot_parameters.turn_speed_coef,
             self.robot_parameters.pos_relative_to_prim,
             self.robot_parameters.solar_panel_joint,
+            self.robot_parameters.scale,
+            self.robot_parameters.usd_prim_path,
+            self.robot_parameters.steer_joints,
         )
         self.add_RRG(
             self.robot_parameters.robot_name,
@@ -146,6 +152,9 @@ class RobotManager:
         turn_speed_coef:float=1,
         pos_relative_to_prim:str="",
         solar_panel_joint:str="",
+        scale:float=1.0,
+        usd_prim_path:str="",
+        steer_joints:List[str]=None,
     ) -> None:
         """
         Add a robot to the scene.
@@ -175,6 +184,9 @@ class RobotManager:
             turn_speed_coef=turn_speed_coef,
             pos_relative_to_prim=pos_relative_to_prim,
             solar_panel_joint=solar_panel_joint,
+            scale=scale,
+            usd_prim_path=usd_prim_path,
+            steer_joints=steer_joints,
         )
         self.robot.load(p, q)
 
@@ -239,6 +251,9 @@ class Robot:
         turn_speed_coef:float=1,
         pos_relative_to_prim:str = "",
         solar_panel_joint:str = "",
+        scale:float = 1.0,
+        usd_prim_path:str = "",
+        steer_joints:List[str] = None,
 
     ) -> None:
         """
@@ -247,10 +262,15 @@ class Robot:
             robot_name (str): The name of the robot.
             robots_root (str, optional): The root path of the robots. Defaults to "/Robots".
             is_ROS2 (bool, optional): Whether the robots are ROS2 enabled or not. Defaults to False.
-            domain_id (int, optional): The domain id of the robot. Defaults to 0."""
+            domain_id (int, optional): The domain id of the robot. Defaults to 0.
+            scale (float, optional): Uniform scale applied to the robot. Defaults to 1.0.
+            usd_prim_path (str, optional): Prim to reference inside the usd file. Required for usd
+                files that declare no default prim. Defaults to "" (use the default prim)."""
 
         self.stage: Usd.Stage = omni.usd.get_context().get_stage()
         self.usd_path = str(usd_path)
+        self.scale = float(scale)
+        self._usd_prim_path = usd_prim_path
         self.robots_root = robots_root
         self.robot_name = robot_name
         self.robot_path = os.path.join(self.robots_root, self.robot_name.strip("/"))
@@ -259,7 +279,11 @@ class Robot:
         self.dc = _dynamic_control.acquire_dynamic_control_interface()
         self.root_body_id = None
         self._wheel_joint_names = wheel_joints
+        self._steer_joint_names = steer_joints or []
         self._dofs = {} # dof = Degree of Freedom
+        # Name-keyed dofs for per-wheel drive and corner steering; see _init_named_dofs.
+        self._wheel_dofs = None
+        self._steer_dofs = None
         self._camera_conf = camera_conf
         self._cameras = {}
         self._depth_cameras = {}
@@ -278,6 +302,9 @@ class Robot:
         if robot_name == "pragyaan":
             from src.mission_specific.pragyaan.subsystems.pragyaan_subsystems_handler import PragyaanSubsystemsHandler
             self.subsystems = PragyaanSubsystemsHandler(pos_relative_to_prim)
+        elif robot_name == "perseverance":
+            from src.mission_specific.perseverance.subsystems.perseverance_subsystems_handler import PerseveranceSubsystemsHandler
+            self.subsystems = PerseveranceSubsystemsHandler()
 
     def get_root_rigid_body_path(self) -> None:
         """
@@ -318,14 +345,33 @@ class Robot:
 
         self.stage = omni.usd.get_context().get_stage()
         self.set_reset_pose(position, orientation)
-        createObject(
-            self.robot_path,
-            self.stage,
-            self.usd_path,
-            is_instance=False,
-            position=Gf.Vec3d(*position),
-            rotation=Gf.Quatd(*orientation),
-        )
+        if self._usd_prim_path:
+            # createObject() references the usd file's default prim. Robots whose usd declares no
+            # default prim (or that nest the robot under an absolute path their joints refer to)
+            # need the reference targeted explicitly, so build the xform here instead.
+            obj_prim, _ = createXform(self.stage, self.robot_path)
+            xform = UsdGeom.Xformable(obj_prim)
+            addDefaultOps(xform)
+            setDefaultOpsTyped(
+                xform,
+                Gf.Vec3d(*position),
+                Gf.Quatd(*orientation),
+                Gf.Vec3d(self.scale, self.scale, self.scale),
+            )
+            obj_prim.GetReferences().AddReference(
+                assetPath=self.usd_path,
+                primPath=Sdf.Path(self._usd_prim_path),
+            )
+        else:
+            createObject(
+                self.robot_path,
+                self.stage,
+                self.usd_path,
+                is_instance=False,
+                position=Gf.Vec3d(*position),
+                rotation=Gf.Quatd(*orientation),
+                scale=Gf.Vec3d(self.scale, self.scale, self.scale),
+            )
         self.edit_graphs()
         self._initialize_cameras()
 
@@ -468,7 +514,7 @@ class Robot:
 
     def get_wheels_joint_angles(self):
         self._init_dofs()
-        
+
         joint_angles = []
         for side in ["left","right"]:
             for dof in self._dofs[side]:
@@ -476,6 +522,72 @@ class Robot:
                 joint_angles.append(joint_angle)
 
         return joint_angles
+
+    # ── per-wheel / steering control ─────────────────────────────────────────────
+    # drive_straight/drive_turn above set a whole side to one speed, which is enough for skid
+    # steering. Ackermann needs each wheel driven at its own speed and the corner wheels steered
+    # individually, so these address joints by name instead.
+
+    def set_wheel_velocities(self, velocities: Dict[str, float]) -> None:
+        """
+        Set drive joint velocity targets (rad/s), keyed by wheel name.
+
+        Wheel names are the drive joint names with the "drive_joint_" prefix stripped, e.g.
+        "front_left". Names with no matching dof are ignored so a partial dict is safe.
+        """
+        self._init_named_dofs()
+
+        for wheel_name, velocity in velocities.items():
+            dof = self._wheel_dofs.get(wheel_name)
+            if dof is not None:
+                self.dc.set_dof_velocity_target(dof, float(velocity))
+
+    def set_steer_angles(self, angles: Dict[str, float]) -> None:
+        """
+        Set steer joint position targets (radians), keyed by wheel name.
+
+        The steer joints in rover_with_sensors.usd are position drives (stiffness 500,
+        damping 200), so a position target is the right control mode here — unlike the drive
+        joints, which are velocity drives.
+        """
+        self._init_named_dofs()
+
+        for wheel_name, angle in angles.items():
+            dof = self._steer_dofs.get(wheel_name)
+            if dof is not None:
+                self.dc.set_dof_position_target(dof, float(angle))
+
+    def has_steering(self) -> bool:
+        """True when the robot config declared steer joints and they resolved to dofs."""
+        self._init_named_dofs()
+        return bool(self._steer_dofs)
+
+    def _init_named_dofs(self) -> None:
+        """
+        Resolve drive and steer joints to dofs, keyed by wheel name.
+
+        Lazily initialized for the same reason as _init_dofs: the articulation is not queryable
+        from load(), so this runs on first use instead.
+        """
+        if self._wheel_dofs is not None:
+            return
+
+        self._wheel_dofs = {}
+        self._steer_dofs = {}
+        art = self._get_art()
+
+        for side in ("left", "right"):
+            for joint_name in self._wheel_joint_names.get(side, []):
+                dof = self.dc.find_articulation_dof(art, joint_name)
+                if dof != _dynamic_control.INVALID_HANDLE:
+                    self._wheel_dofs[joint_name.replace("drive_joint_", "")] = dof
+
+        for joint_name in self._steer_joint_names:
+            dof = self.dc.find_articulation_dof(art, joint_name)
+            if dof != _dynamic_control.INVALID_HANDLE:
+                self._steer_dofs[joint_name.replace("steer_joint_", "")] = dof
+            else:
+                print(f"[warn] steer joint '{joint_name}' not found in articulation {self.robot_path}")
 
     def _init_dofs(self):
         #NOTE idealy, this would be initialized inside load(),

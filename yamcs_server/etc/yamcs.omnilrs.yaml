@@ -1,0 +1,60 @@
+dataPartitioningByTime: YYYY/MM
+
+services:
+  # NOTE: no XtceTmRecorder. The rover downlinks software parameters through the API rather than
+  # sending TM packets, so the MDB declares no containers and there is nothing to decode. Adding
+  # the recorder (or any tm stream) makes Yamcs refuse to start: "MDB does not have a root
+  # sequence container".
+  #
+  # Records every parameter value pushed by the rover. Together with ParameterArchive below, this
+  # is where the downlinked rover state is *stored*.
+  - class: org.yamcs.archive.ParameterRecorder
+  - class: org.yamcs.archive.AlarmRecorder
+  - class: org.yamcs.archive.EventRecorder
+  - class: org.yamcs.archive.ReplayServer
+  - class: org.yamcs.archive.CommandHistoryRecorder
+  - class: org.yamcs.parameter.SystemParametersService
+    args:
+      producers: ['jvm', 'fs']
+  - class: org.yamcs.timeline.TimelineService
+  - class: org.yamcs.plists.ParameterListService
+  # Makes the recorded parameters queryable over time in the web UI's Archive Browser.
+  - class: org.yamcs.parameterarchive.ParameterArchive
+  - class: org.yamcs.ProcessorCreatorService
+    args:
+      name: "realtime"
+      type: "realtime"
+
+mdb:
+  # Loaded straight from the repo checkout (see docker-compose.yml), so Yamcs and
+  # MdbParsingService always read the exact same file.
+  - type: "xtce"
+    spec: "mdb/perseverance.xml"
+
+dataLinks:
+  # Telecommand uplink to the simulator. The OmniLRS CommandsHandler binds this address and port
+  # (cfg/mode/Yamcs.yaml: tc_receive_address / tc_receive_port) and decodes the datagram with
+  # MdbParsingService.
+  #
+  # GenericCommandPostprocessor without errorDetection adds nothing to the packet, so what lands
+  # in the socket is exactly what the MDB describes: the ASCII command name followed by its
+  # arguments, big-endian. decode_tc_payload() matches on that leading name, so a postprocessor
+  # that prepended a header (IssCommandPostprocessor, for instance) would break decoding.
+  - name: tc-udp
+    class: org.yamcs.tctm.UdpTcDataLink
+    stream: tc_realtime
+    host: 127.0.0.1
+    port: 10025
+    commandPostprocessorClassName: org.yamcs.tctm.GenericCommandPostprocessor
+
+streamConfig:
+  # No tm stream on purpose — see the XtceTmRecorder note above.
+  cmdHist: ["cmdhist_realtime"]
+  event: ["events_realtime"]
+  param: ["pp_realtime", "sys_param", "proc_param"]
+  parameterAlarm: ["alarms_realtime"]
+  eventAlarm: ["event_alarms_realtime"]
+  tc:
+    - name: tc_realtime
+      processor: realtime
+      tcPatterns: ["/Rover/.*"]

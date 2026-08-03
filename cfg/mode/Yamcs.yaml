@@ -1,8 +1,12 @@
 name: Yamcs
 instance_conf:
+  # Points at the local ground station in yamcs_server/ (docker compose up -d --build).
+  # The simulator container and the Yamcs container both run with --network=host, so loopback
+  # reaches across.
   address: "localhost:8090"
-  instance: "workshop"
+  instance: "omnilrs"
   processor: "realtime"
+  # CommandsHandler binds this address/port; the Yamcs tc-udp data link sends here.
   tc_receive_address: "127.0.0.1"
   tc_receive_port: 10025
-  url_full_nginx: "https://workshop.jaops.com/yamcs"
+  url_full_nginx: "http://localhost:8090"
