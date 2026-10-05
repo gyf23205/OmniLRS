@@ -362,6 +362,32 @@ class LunaryardController(BaseEnv):
         self.RM.updateImageData(self.dem, self.mask)
         self.RM.randomizeInstancers(10)
 
+    def get_terrain(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Copies of the current DEM and rock mask, for editing outside the environment.
+
+        Returns:
+            tuple: the DEM and the mask.
+        """
+
+        return np.array(self.T.getDEM(), copy=True), np.array(self.T.getMask(), copy=True)
+
+    def set_terrain(self, dem: np.ndarray, mask: np.ndarray) -> None:
+        """
+        Replaces the terrain with an edited DEM, and tells the rocks about it.
+
+        Rocks already placed are not moved; call randomize_rocks afterwards to place them against the
+        new DEM and mask.
+
+        Args:
+            dem (np.ndarray): the new DEM, same shape as the current one.
+            mask (np.ndarray): the matching mask, 1 where rocks may be placed.
+        """
+
+        self.T.setDEMAndMask(dem, mask)
+        self.load_DEM()
+        self.RM.updateImageData(self.dem, self.mask)
+
     def enable_rocks(self, flag: bool = True) -> None:
         """
         Turns the rocks on or off.

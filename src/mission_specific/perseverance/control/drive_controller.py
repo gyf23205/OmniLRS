@@ -26,7 +26,7 @@ condition is mirrored here, in _check_interlocks.
 
 import math
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from src.mission_specific.perseverance.control.ackermann_model import AckermannModel
 from src.subsystems.device import CommonDevice, HealthState, PowerState
@@ -107,6 +107,8 @@ class PerseveranceDriveController:
 
         self._distance_remaining: float = 0.0
         self._heading_error: float = 0.0
+        # What the joints were last asked for, for the navigation filter's command-tracking residual.
+        self._last_wheel_command: Optional[Dict[str, float]] = None
 
     # ── telemetry accessors ──────────────────────────────────────────────────────
     @property
@@ -129,7 +131,20 @@ class PerseveranceDriveController:
     def is_executing(self) -> bool:
         return self._status == CommandStatus.EXECUTING
 
+    @property
+    def last_wheel_command(self) -> Optional[Dict[str, float]]:
+        """Drive joint rates (rad/s) most recently written, keyed by wheel; None before the first command."""
+        return self._last_wheel_command
+
+    @property
+    def steer_sign(self) -> float:
+        return self._steer_sign
+
     # ── pose ─────────────────────────────────────────────────────────────────────
+    def pose(self) -> Tuple[float, float, float]:
+        """(x, y, yaw) exactly as the controller steers by it, so a caller predicting a leg agrees with the leg."""
+        return self._pose()
+
     def _pose(self) -> Tuple[float, float, float]:
         """Rover (x, y, yaw) in world coordinates. yaw is the heading of the forward axis."""
         position, orientation = self._robot_RG.get_pose_of_base_link()
@@ -137,7 +152,7 @@ class PerseveranceDriveController:
 
         # Yaw of the body +Y axis (the rover's forward axis) expressed in the world frame.
         # Rotating (0,1,0) by the quaternion gives (2(xy - wz), 1 - 2(x^2 + z^2), 2(yz + wx)).
-        # forward_axis_sign flips the *vector* when +Y turns out to point aft; negating the
+        # forward_axis_sign flips the *vector* when +Y turns out to point backward; negating the
         # resulting angle instead would mirror the heading rather than reverse it.
         forward_x = 2.0 * (x * y - w * z) * self._forward_sign
         forward_y = (1.0 - 2.0 * (x * x + z * z)) * self._forward_sign
@@ -160,7 +175,10 @@ class PerseveranceDriveController:
             return "go_nogo is NOGO"
         if subsystems.get_device_power_state(CommonDevice.MOTOR_CONTROLLER) != PowerState.ON:
             return "motor controller is OFF"
-        if subsystems.get_device_health_state(CommonDevice.MOTOR_CONTROLLER) != HealthState.NOMINAL:
+        # FAULT blocks driving; DEGRADED deliberately does not. A weakened actuator is exactly the
+        # case worth watching the closed loop fight, so refusing to move would destroy the thing
+        # being demonstrated. FAULT stays reserved for the controller itself being dead.
+        if subsystems.get_device_health_state(CommonDevice.MOTOR_CONTROLLER) == HealthState.FAULT:
             return "motor controller health is FAULT"
         return None
 
@@ -378,6 +396,7 @@ class PerseveranceDriveController:
             steer_angles = {name: angle * self._steer_sign for name, angle in steer_angles.items()}
         self._robot.set_steer_angles(steer_angles)
         self._robot.set_wheel_velocities(wheel_speeds)
+        self._last_wheel_command = dict(wheel_speeds)
 
     def _halt(self) -> None:
         steer, speeds = self._ackermann.stop()

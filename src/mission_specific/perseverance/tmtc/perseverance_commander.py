@@ -25,14 +25,27 @@ class PerseveranceCommander:
     command_distance_remaining / command_heading_error parameters.
     """
 
-    def __init__(self, robot, transmitter, drive_controller, obc_handler):
+    def __init__(self, robot, transmitter, drive_controller, obc_handler, fault_injector=None):
         self._robot = robot
         self._transmitter = transmitter
         self._drive = drive_controller
         self._obc_handler = obc_handler
+        self._faults = fault_injector
+
+    @staticmethod
+    def _format(value):
+        """
+        Render one argument for the acknowledgement.
+
+        Arguments cross the wire as float32 and come back widened to float64, so an operator who
+        typed 0.8 would otherwise see it echoed as 0.800000011920929. Rounding to float32's real
+        precision restores what was actually sent - and this string is archived as
+        /Rover/active_command, so it is worth being readable months later.
+        """
+        return round(value, 6) if isinstance(value, float) else value
 
     def _acknowledge(self, name, **kwargs):
-        args = ", ".join(f"{key}={value}" for key, value in kwargs.items())
+        args = ", ".join(f"{key}={self._format(value)}" for key, value in kwargs.items())
         description = f"{name}({args})"
         print(f"[TC] received: {description}", flush=True)
         self._transmitter.set_active_command(description)
@@ -89,3 +102,69 @@ class PerseveranceCommander:
         # NOGO is the ground pulling clearance: anything in flight stops immediately.
         if state == GoNogoState.NOGO:
             self._drive.abort("go_nogo set to NOGO")
+
+    # ── fault injection ──────────────────────────────────────────────────────────
+    # Not flight commands. These reach past the rover software into the simulation to break an
+    # actuator, a sensor, the battery or the link, so the closed loop can be watched compensating —
+    # or failing to. None of them aborts a command: a fault degrades the rover, it does not stop it.
+    # Health flags do move, but only to DEGRADED, which is deliberately not an interlock.
+    def inject_wheel_torque_fault(self, wheel, severity):
+        self._acknowledge("inject_wheel_torque_fault", wheel=wheel, severity=severity)
+        if self._require_injector():
+            self._faults.inject_wheel_torque(wheel, float(severity))
+
+    def inject_wheel_stuck_fault(self, wheel, severity):
+        self._acknowledge("inject_wheel_stuck_fault", wheel=wheel, severity=severity)
+        if self._require_injector():
+            self._faults.inject_wheel_stuck(wheel, float(severity))
+
+    def inject_wheel_slip_fault(self, wheel, severity):
+        self._acknowledge("inject_wheel_slip_fault", wheel=wheel, severity=severity)
+        if self._require_injector():
+            self._faults.inject_wheel_slip(wheel, float(severity))
+
+    def inject_wheel_sink_fault(self, wheel, severity):
+        self._acknowledge("inject_wheel_sink_fault", wheel=wheel, severity=severity)
+        if self._require_injector():
+            self._faults.inject_wheel_sink(wheel, float(severity))
+
+    def inject_steer_torque_fault(self, corner, severity):
+        self._acknowledge("inject_steer_torque_fault", corner=corner, severity=severity)
+        if self._require_injector():
+            self._faults.inject_steer_torque(corner, float(severity))
+
+    def inject_steer_stuck_fault(self, corner, angle):
+        self._acknowledge("inject_steer_stuck_fault", corner=corner, angle=angle)
+        if self._require_injector():
+            self._faults.inject_steer_stuck(corner, float(angle))
+
+    def inject_imu_fault(self, bias, noise):
+        self._acknowledge("inject_imu_fault", bias=bias, noise=noise)
+        if self._require_injector():
+            self._faults.inject_imu_fault(float(bias), float(noise))
+
+    def inject_camera_fault(self, loss, noise):
+        self._acknowledge("inject_camera_fault", loss=loss, noise=noise)
+        if self._require_injector():
+            self._faults.inject_camera_fault(float(loss), float(noise))
+
+    def inject_battery_fault(self, severity):
+        self._acknowledge("inject_battery_fault", severity=severity)
+        if self._require_injector():
+            self._faults.inject_battery_fault(float(severity))
+
+    def inject_comms_fault(self, tm_loss, tc_loss):
+        self._acknowledge("inject_comms_fault", tm_loss=tm_loss, tc_loss=tc_loss)
+        if self._require_injector():
+            self._faults.inject_comms_fault(float(tm_loss), float(tc_loss))
+
+    def clear_faults(self):
+        self._acknowledge("clear_faults")
+        if self._require_injector():
+            self._faults.clear_all()
+
+    def _require_injector(self) -> bool:
+        if self._faults is None:
+            print("[TC] fault injection unavailable: no injector was built", flush=True)
+            return False
+        return True

@@ -13,16 +13,26 @@ robots_settings:
       # ~30 Hz, the rover state reaches the ground once per second.
       robot_stats: 1
     images:
-      # No image downlink for this rover. ImagesHandler is still constructed by YamcsTMTC, so the
-      # keys have to exist, but with no buckets it does nothing.
+      # One nav-cam bucket. The frame is uploaded through the Yamcs storage api rather than shared
+      # on disk, so the two containers need not agree about /tmp.
       no_data_image_path: ""
-      buckets: []
+      buckets:
+        - name: "images_navcam"
+          path: "/Rover/camera/images_navcam"
+    camera_downlink:
+      bucket: "images_navcam"
+      resolution: "low"   # a key of parameters.camera.resolutions in the robot config
+      # Seconds of simulation time. Deliberately far slower than the 1 Hz parameter downlink:
+      # images are the one thing a real low-rate link genuinely cannot afford.
+      period: 5
     parameters:
       pose_of_base_link: "/Rover/pose_ground_truth"
       imu_accelerometer: "/Rover/imu_accelerometer"
       imu_gyroscope: "/Rover/imu_gyroscope"
       imu_orientation: "/Rover/imu_orientation"
       motor_encoder: "/Rover/motor_encoder"
+      motor_effort: "/Rover/motor_effort"
+      steer_encoder: "/Rover/steer_encoder"
       contact_force_front_left: "/Rover/contact_force_front_left"
       contact_force_front_right: "/Rover/contact_force_front_right"
       contact_force_mid_left: "/Rover/contact_force_mid_left"
@@ -59,6 +69,40 @@ robots_settings:
       command_distance_remaining: "/Rover/command_distance_remaining"
       command_heading_error: "/Rover/command_heading_error"
       command_target: "/Rover/command_target"
+      # Injected faults. Kept on their own /Rover/faults path so nothing artificial can be read as
+      # a real rover measurement.
+      faults_active: "/Rover/faults/active"
+      wheel_torque_limit: "/Rover/faults/wheel_torque_limit"
+      wheel_damping_factor: "/Rover/faults/wheel_damping_factor"
+      wheel_friction: "/Rover/faults/wheel_friction"
+      wheel_sinkage: "/Rover/faults/wheel_sinkage"
+      steer_torque_limit: "/Rover/faults/steer_torque_limit"
+      # Ground-truth health, straight from the injector - no detection logic involved.
+      wheel_health: "/Rover/faults/wheel_health"
+      steer_health: "/Rover/faults/steer_health"
+      motor_controller_health: "/Rover/faults/motor_controller_health"
+      imu_health: "/Rover/faults/imu_health"
+      camera_health: "/Rover/faults/camera_health"
+      battery_health: "/Rover/faults/battery_health"
+      comms_health: "/Rover/faults/comms_health"
+      parasitic_load: "/Rover/faults/parasitic_load"
+      dropped: "/Rover/faults/dropped"
+      # Onboard navigation filter. Computed from the rover's own sensors: observable, not oracle.
+      estimator_pose: "/Rover/estimator/pose"
+      estimator_motion: "/Rover/estimator/motion"
+      estimator_bias: "/Rover/estimator/bias"
+      estimator_imu_residual: "/Rover/estimator/imu_residual"
+      estimator_nis: "/Rover/estimator/nis"
+      estimator_wheel_rolling_mean: "/Rover/estimator/wheel_rolling_mean"
+      estimator_wheel_rolling_max: "/Rover/estimator/wheel_rolling_max"
+      estimator_wheel_sideslip_mean: "/Rover/estimator/wheel_sideslip_mean"
+      estimator_wheel_sideslip_max: "/Rover/estimator/wheel_sideslip_max"
+      estimator_wheel_effort_mean: "/Rover/estimator/wheel_effort_mean"
+      estimator_wheel_effort_max: "/Rover/estimator/wheel_effort_max"
+      estimator_wheel_tracking_mean: "/Rover/estimator/wheel_tracking_mean"
+      estimator_wheel_tracking_max: "/Rover/estimator/wheel_tracking_max"
+      estimator_cusum_alarm: "/Rover/estimator/cusum_alarm"
+      estimator_reacquisitions: "/Rover/estimator/reacquisitions"
     commands:
       drive_straight: "/Rover/motor/drive_straight"
       drive_turn: "/Rover/motor/drive_turn"
@@ -67,3 +111,15 @@ robots_settings:
       power_electronics: "/Rover/system/power_electronics"
       solar_panel: "/Rover/system/deploy_solar_panel"
       go_nogo: "/Rover/system/go_nogo"
+      # Simulation backdoor, not flight commands. See src/mission_specific/perseverance/faults/.
+      inject_wheel_torque_fault: "/Rover/faults/inject_wheel_torque_fault"
+      inject_wheel_stuck_fault: "/Rover/faults/inject_wheel_stuck_fault"
+      inject_wheel_slip_fault: "/Rover/faults/inject_wheel_slip_fault"
+      inject_wheel_sink_fault: "/Rover/faults/inject_wheel_sink_fault"
+      inject_steer_torque_fault: "/Rover/faults/inject_steer_torque_fault"
+      inject_steer_stuck_fault: "/Rover/faults/inject_steer_stuck_fault"
+      inject_imu_fault: "/Rover/faults/inject_imu_fault"
+      inject_camera_fault: "/Rover/faults/inject_camera_fault"
+      inject_battery_fault: "/Rover/faults/inject_battery_fault"
+      inject_comms_fault: "/Rover/faults/inject_comms_fault"
+      clear_faults: "/Rover/faults/clear_faults"

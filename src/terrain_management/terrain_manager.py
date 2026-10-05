@@ -274,6 +274,24 @@ class TerrainManager:
         self._DEM, self._mask, self._craters_data = self._G.randomize()
         self.update(update_collider=True)
 
+    def setDEMAndMask(self, dem: np.ndarray, mask: np.ndarray) -> None:
+        """
+        Replaces the terrain with a DEM edited outside the manager (mesh, collider, semantic).
+
+        Also registers it with the generator, so the deformation engine deforms this DEM rather than
+        snapping back to the one it was last given.
+
+        Args:
+            dem (np.ndarray): the new DEM, same shape as getDEM().
+            mask (np.ndarray): the matching mask, 1 where rocks may be placed.
+        """
+
+        assert dem.shape == self._DEM.shape, f"DEM shape {dem.shape} does not match {self._DEM.shape}"
+        self._DEM = np.asarray(dem, dtype=self._DEM.dtype)
+        self._mask = np.asarray(mask, dtype=self._mask.dtype)
+        self._G.register_terrain(self._DEM, self._mask)
+        self.update(update_collider=True)
+
     def deformTerrain(
         self, world_positions: np.ndarray, world_orientations: np.ndarray, contact_forces: np.ndarray,
         update_mesh: bool = True,

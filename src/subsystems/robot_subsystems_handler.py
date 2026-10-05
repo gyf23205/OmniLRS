@@ -88,3 +88,7 @@ class RobotSubsystemsHandler(ABC):
     
     def get_device_health_state(self, device_name):
         return self._devices[device_name].get_health_state()
+
+    def set_parasitic_load(self, watts: float):
+        """Extra battery load in watts, used by fault injection. Zero is a healthy rover."""
+        self._power_model.set_parasitic_load(watts)

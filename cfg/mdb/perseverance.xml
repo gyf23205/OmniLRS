@@ -204,6 +204,23 @@ See https://github.com/yamcs/pymdb
           <Unit form="calibrated">A</Unit>
         </UnitSet>
       </FloatParameterType>
+      <ArrayParameterType name="motor_effort" arrayTypeRef="motor_effort__el">
+        <DimensionList>
+          <Dimension>
+            <StartingIndex>
+              <FixedValue>0</FixedValue>
+            </StartingIndex>
+            <EndingIndex>
+              <FixedValue>5</FixedValue>
+            </EndingIndex>
+          </Dimension>
+        </DimensionList>
+      </ArrayParameterType>
+      <FloatParameterType name="motor_effort__el" sizeInBits="32">
+        <UnitSet>
+          <Unit form="calibrated">N*m</Unit>
+        </UnitSet>
+      </FloatParameterType>
       <ArrayParameterType name="motor_encoder" arrayTypeRef="motor_encoder__el">
         <DimensionList>
           <Dimension>
@@ -307,6 +324,23 @@ See https://github.com/yamcs/pymdb
           <Enumeration value="1" label="DEPLOYED" shortDescription="Panel deployed"/>
         </EnumerationList>
       </EnumeratedParameterType>
+      <ArrayParameterType name="steer_encoder" arrayTypeRef="steer_encoder__el">
+        <DimensionList>
+          <Dimension>
+            <StartingIndex>
+              <FixedValue>0</FixedValue>
+            </StartingIndex>
+            <EndingIndex>
+              <FixedValue>3</FixedValue>
+            </EndingIndex>
+          </Dimension>
+        </DimensionList>
+      </ArrayParameterType>
+      <FloatParameterType name="steer_encoder__el" sizeInBits="32">
+        <UnitSet>
+          <Unit form="calibrated">deg</Unit>
+        </UnitSet>
+      </FloatParameterType>
       <FloatParameterType name="temperature_back" sizeInBits="32">
         <UnitSet>
           <Unit form="calibrated">degC</Unit>
@@ -418,6 +452,9 @@ See https://github.com/yamcs/pymdb
       <Parameter name="motor_current" parameterTypeRef="motor_current" shortDescription="Per-motor current draw">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
+      <Parameter name="motor_effort" parameterTypeRef="motor_effort" shortDescription="Measured drive joint torque per wheel: front, mid, rear; left then right">
+        <ParameterProperties dataSource="local" persistence="true"/>
+      </Parameter>
       <Parameter name="motor_encoder" parameterTypeRef="motor_encoder" shortDescription="Drive joint angles, 1024 counts per revolution">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
@@ -448,6 +485,9 @@ See https://github.com/yamcs/pymdb
       <Parameter name="solar_panel_state" parameterTypeRef="solar_panel_state" shortDescription="Solar panel deployment state">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
+      <Parameter name="steer_encoder" parameterTypeRef="steer_encoder" shortDescription="Measured steer angle of the four corner joints">
+        <ParameterProperties dataSource="local" persistence="true"/>
+      </Parameter>
       <Parameter name="temperature_back" parameterTypeRef="temperature_back" shortDescription="Temperature of the -X face">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
@@ -475,6 +515,936 @@ See https://github.com/yamcs/pymdb
     </ParameterSet>
   </TelemetryMetaData>
   <CommandMetaData/>
+  <SpaceSystem name="camera">
+    <TelemetryMetaData/>
+    <CommandMetaData/>
+    <SpaceSystem name="images_navcam">
+      <TelemetryMetaData>
+        <ParameterTypeSet>
+          <StringParameterType name="name" initialValue="none"/>
+          <IntegerParameterType name="number" signed="false" sizeInBits="32"/>
+          <StringParameterType name="url_full" initialValue="none"/>
+          <StringParameterType name="url_full_nginx" initialValue="none"/>
+          <StringParameterType name="url_storage" initialValue="none"/>
+        </ParameterTypeSet>
+        <ParameterSet>
+          <Parameter name="name" parameterTypeRef="name" shortDescription="File name of the latest nav-cam frame">
+            <ParameterProperties dataSource="local" persistence="true"/>
+          </Parameter>
+          <Parameter name="number" parameterTypeRef="number" shortDescription="Sequence number of the latest nav-cam frame">
+            <ParameterProperties dataSource="local" persistence="true"/>
+          </Parameter>
+          <Parameter name="url_full" parameterTypeRef="url_full" shortDescription="Absolute Yamcs URL of the latest frame">
+            <ParameterProperties dataSource="local" persistence="true"/>
+          </Parameter>
+          <Parameter name="url_full_nginx" parameterTypeRef="url_full_nginx" shortDescription="Reverse-proxy URL of the latest frame">
+            <ParameterProperties dataSource="local" persistence="true"/>
+          </Parameter>
+          <Parameter name="url_storage" parameterTypeRef="url_storage" shortDescription="Bucket-relative path of the latest frame">
+            <ParameterProperties dataSource="local" persistence="true"/>
+          </Parameter>
+        </ParameterSet>
+      </TelemetryMetaData>
+      <CommandMetaData/>
+    </SpaceSystem>
+  </SpaceSystem>
+  <SpaceSystem name="estimator">
+    <TelemetryMetaData>
+      <ParameterTypeSet>
+        <AggregateParameterType name="bias">
+          <MemberList>
+            <Member name="gyro" typeRef="bias__gyro"/>
+            <Member name="accel" typeRef="bias__accel"/>
+          </MemberList>
+        </AggregateParameterType>
+        <FloatParameterType name="bias__gyro" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">rad/s</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <FloatParameterType name="bias__accel" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">m/s^2</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <IntegerParameterType name="cusum_alarm" signed="false" sizeInBits="32"/>
+        <AggregateParameterType name="imu_residual">
+          <MemberList>
+            <Member name="gyro_mean" typeRef="imu_residual__gyro_mean"/>
+            <Member name="gyro_max" typeRef="imu_residual__gyro_max"/>
+            <Member name="heading_mean" typeRef="imu_residual__heading_mean"/>
+            <Member name="heading_max" typeRef="imu_residual__heading_max"/>
+            <Member name="lateral_force_mean" typeRef="imu_residual__lateral_force_mean"/>
+            <Member name="lateral_force_max" typeRef="imu_residual__lateral_force_max"/>
+          </MemberList>
+        </AggregateParameterType>
+        <FloatParameterType name="imu_residual__gyro_mean" sizeInBits="32"/>
+        <FloatParameterType name="imu_residual__gyro_max" sizeInBits="32"/>
+        <FloatParameterType name="imu_residual__heading_mean" sizeInBits="32"/>
+        <FloatParameterType name="imu_residual__heading_max" sizeInBits="32"/>
+        <FloatParameterType name="imu_residual__lateral_force_mean" sizeInBits="32"/>
+        <FloatParameterType name="imu_residual__lateral_force_max" sizeInBits="32"/>
+        <AggregateParameterType name="motion">
+          <MemberList>
+            <Member name="speed" typeRef="motion__speed"/>
+            <Member name="lateral_speed" typeRef="motion__lateral_speed"/>
+            <Member name="yaw_rate" typeRef="motion__yaw_rate"/>
+          </MemberList>
+        </AggregateParameterType>
+        <FloatParameterType name="motion__speed" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">m/s</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <FloatParameterType name="motion__lateral_speed" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">m/s</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <FloatParameterType name="motion__yaw_rate" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">rad/s</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <AggregateParameterType name="nis">
+          <MemberList>
+            <Member name="wheels" typeRef="nis__wheels"/>
+            <Member name="gyro" typeRef="nis__gyro"/>
+            <Member name="heading" typeRef="nis__heading"/>
+          </MemberList>
+        </AggregateParameterType>
+        <FloatParameterType name="nis__wheels" sizeInBits="32"/>
+        <FloatParameterType name="nis__gyro" sizeInBits="32"/>
+        <FloatParameterType name="nis__heading" sizeInBits="32"/>
+        <AggregateParameterType name="pose">
+          <MemberList>
+            <Member name="x" typeRef="pose__x"/>
+            <Member name="y" typeRef="pose__y"/>
+            <Member name="yaw" typeRef="pose__yaw"/>
+          </MemberList>
+        </AggregateParameterType>
+        <FloatParameterType name="pose__x" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">m</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <FloatParameterType name="pose__y" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">m</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <FloatParameterType name="pose__yaw" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">deg</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <IntegerParameterType name="reacquisitions" signed="false" sizeInBits="16"/>
+        <ArrayParameterType name="wheel_effort_max" arrayTypeRef="wheel_effort_max__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_effort_max__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_effort_mean" arrayTypeRef="wheel_effort_mean__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_effort_mean__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_rolling_max" arrayTypeRef="wheel_rolling_max__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_rolling_max__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_rolling_mean" arrayTypeRef="wheel_rolling_mean__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_rolling_mean__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_sideslip_max" arrayTypeRef="wheel_sideslip_max__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_sideslip_max__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_sideslip_mean" arrayTypeRef="wheel_sideslip_mean__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_sideslip_mean__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_tracking_max" arrayTypeRef="wheel_tracking_max__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_tracking_max__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_tracking_mean" arrayTypeRef="wheel_tracking_mean__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_tracking_mean__el" sizeInBits="32"/>
+      </ParameterTypeSet>
+      <ParameterSet>
+        <Parameter name="bias" parameterTypeRef="bias" shortDescription="Estimated IMU biases">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="cusum_alarm" parameterTypeRef="cusum_alarm" shortDescription="Persistent-shift alarms, one bit per residual in nav_filter.RESIDUAL_KEYS order">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="imu_residual" parameterTypeRef="imu_residual" shortDescription="Normalized gyro and heading innovations, and unexplained lateral force (sigma)">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="motion" parameterTypeRef="motion" shortDescription="Estimated forward speed, sideways sliding speed and yaw rate">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="nis" parameterTypeRef="nis" shortDescription="Mean normalized innovation squared over the window (nominally 1)">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="pose" parameterTypeRef="pose" shortDescription="Estimated pose, episode-local position and world heading of the forward axis">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="reacquisitions" parameterTypeRef="reacquisitions" shortDescription="Times the gyro or heading channel was re-accepted after being rejected for reacquire_s (episode total)">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_effort_max" parameterTypeRef="wheel_effort_max" shortDescription="Drive torque in excess of the torque model, in the direction of motion, window max, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_effort_mean" parameterTypeRef="wheel_effort_mean" shortDescription="Drive torque in excess of the torque model, in the direction of motion, window mean, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_rolling_max" parameterTypeRef="wheel_rolling_max" shortDescription="Wheel speed innovation against the EKF prediction, window max, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_rolling_mean" parameterTypeRef="wheel_rolling_mean" shortDescription="Wheel speed innovation against the EKF prediction, window mean, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_sideslip_max" parameterTypeRef="wheel_sideslip_max" shortDescription="Wheel sliding along its axle (no-side-slip innovation), window max, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_sideslip_mean" parameterTypeRef="wheel_sideslip_mean" shortDescription="Wheel sliding along its axle (no-side-slip innovation), window mean, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_tracking_max" parameterTypeRef="wheel_tracking_max" shortDescription="Commanded wheel rate the wheel failed to reach, window max, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_tracking_mean" parameterTypeRef="wheel_tracking_mean" shortDescription="Commanded wheel rate the wheel failed to reach, window mean, sigma">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+      </ParameterSet>
+    </TelemetryMetaData>
+    <CommandMetaData/>
+  </SpaceSystem>
+  <SpaceSystem name="faults">
+    <TelemetryMetaData>
+      <ParameterTypeSet>
+        <StringParameterType name="active" initialValue="none"/>
+        <EnumeratedParameterType name="battery_health">
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <EnumeratedParameterType name="camera_health">
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <EnumeratedParameterType name="comms_health">
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <AggregateParameterType name="dropped">
+          <MemberList>
+            <Member name="tm" typeRef="dropped__tm" shortDescription="Telemetry parameters lost on the downlink"/>
+            <Member name="tc" typeRef="dropped__tc" shortDescription="Telecommands lost on the uplink"/>
+            <Member name="camera_frames" typeRef="dropped__camera_frames" shortDescription="Camera frames never sent"/>
+          </MemberList>
+        </AggregateParameterType>
+        <FloatParameterType name="dropped__tm" sizeInBits="32"/>
+        <FloatParameterType name="dropped__tc" sizeInBits="32"/>
+        <FloatParameterType name="dropped__camera_frames" sizeInBits="32"/>
+        <EnumeratedParameterType name="imu_health">
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <EnumeratedParameterType name="motor_controller_health">
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <FloatParameterType name="parasitic_load" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">W</Unit>
+          </UnitSet>
+          <ValidRange validRangeAppliesToCalibrated="true" minInclusive="0.0"/>
+        </FloatParameterType>
+        <ArrayParameterType name="steer_health" arrayTypeRef="steer_health__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>3</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <EnumeratedParameterType name="steer_health__el">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <ArrayParameterType name="steer_torque_limit" arrayTypeRef="steer_torque_limit__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>3</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="steer_torque_limit__el" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">N*m</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <ArrayParameterType name="wheel_damping_factor" arrayTypeRef="wheel_damping_factor__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_damping_factor__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_friction" arrayTypeRef="wheel_friction__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_friction__el" sizeInBits="32"/>
+        <ArrayParameterType name="wheel_health" arrayTypeRef="wheel_health__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <EnumeratedParameterType name="wheel_health__el">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="NOMINAL" shortDescription="Working to spec"/>
+            <Enumeration value="2" label="DEGRADED" shortDescription="Still working, but not to spec"/>
+            <Enumeration value="1" label="FAULT" shortDescription="Failed"/>
+          </EnumerationList>
+        </EnumeratedParameterType>
+        <ArrayParameterType name="wheel_sinkage" arrayTypeRef="wheel_sinkage__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_sinkage__el" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">m</Unit>
+          </UnitSet>
+        </FloatParameterType>
+        <ArrayParameterType name="wheel_torque_limit" arrayTypeRef="wheel_torque_limit__el">
+          <DimensionList>
+            <Dimension>
+              <StartingIndex>
+                <FixedValue>0</FixedValue>
+              </StartingIndex>
+              <EndingIndex>
+                <FixedValue>5</FixedValue>
+              </EndingIndex>
+            </Dimension>
+          </DimensionList>
+        </ArrayParameterType>
+        <FloatParameterType name="wheel_torque_limit__el" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">N*m</Unit>
+          </UnitSet>
+        </FloatParameterType>
+      </ParameterTypeSet>
+      <ParameterSet>
+        <Parameter name="active" parameterTypeRef="active" shortDescription="Summary of every fault currently injected, or 'none'">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="battery_health" parameterTypeRef="battery_health" shortDescription="Battery / power system health, from ground truth">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="camera_health" parameterTypeRef="camera_health" shortDescription="Camera health, from ground truth">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="comms_health" parameterTypeRef="comms_health" shortDescription="Ground link health, from ground truth">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="dropped" parameterTypeRef="dropped" shortDescription="Cumulative losses caused by injected faults">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="imu_health" parameterTypeRef="imu_health" shortDescription="Inertial measurement unit health, from ground truth">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="motor_controller_health" parameterTypeRef="motor_controller_health" shortDescription="Coarse mobility health; DEGRADED whenever any actuator fault is injected">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="parasitic_load" parameterTypeRef="parasitic_load" shortDescription="Injected extra load on the battery; the battery fault's observable">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="steer_health" parameterTypeRef="steer_health" shortDescription="Ground-truth health of each steer actuator; a stuck corner reads FAULT">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="steer_torque_limit" parameterTypeRef="steer_torque_limit" shortDescription="Per-corner steer torque limit; a healthy corner reads the configured nominal">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_damping_factor" parameterTypeRef="wheel_damping_factor" shortDescription="Per-wheel drive damping multiplier from a stuck-wheel fault; a healthy wheel reads 1.0">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_friction" parameterTypeRef="wheel_friction" shortDescription="Per-wheel ground friction coefficient; a slip fault lowers it from the configured nominal">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_health" parameterTypeRef="wheel_health" shortDescription="Ground-truth health of each drive actuator">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_sinkage" parameterTypeRef="wheel_sinkage" shortDescription="Per-wheel depth a sink fault has settled the wheel into the ground; 0 when healthy">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+        <Parameter name="wheel_torque_limit" parameterTypeRef="wheel_torque_limit" shortDescription="Per-wheel drive torque limit; a healthy wheel reads the configured nominal">
+          <ParameterProperties dataSource="local" persistence="true"/>
+        </Parameter>
+      </ParameterSet>
+    </TelemetryMetaData>
+    <CommandMetaData>
+      <ArgumentTypeSet>
+        <FloatArgumentType name="inject_battery_fault__severity" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <FloatArgumentType name="inject_camera_fault__loss" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <FloatArgumentType name="inject_camera_fault__noise" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <FloatArgumentType name="inject_comms_fault__tm_loss" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <FloatArgumentType name="inject_comms_fault__tc_loss" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <FloatArgumentType name="inject_imu_fault__bias" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <FloatArgumentType name="inject_imu_fault__noise" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <EnumeratedArgumentType name="inject_steer_stuck_fault__corner">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="FRONT_LEFT" shortDescription="front left corner"/>
+            <Enumeration value="1" label="FRONT_RIGHT" shortDescription="front right corner"/>
+            <Enumeration value="2" label="REAR_LEFT" shortDescription="rear left corner"/>
+            <Enumeration value="3" label="REAR_RIGHT" shortDescription="rear right corner"/>
+            <Enumeration value="4" label="ALL" shortDescription="Every steerable corner"/>
+          </EnumerationList>
+        </EnumeratedArgumentType>
+        <FloatArgumentType name="inject_steer_stuck_fault__angle" sizeInBits="32">
+          <UnitSet>
+            <Unit form="calibrated">deg</Unit>
+          </UnitSet>
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+        </FloatArgumentType>
+        <EnumeratedArgumentType name="inject_steer_torque_fault__corner">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="FRONT_LEFT" shortDescription="front left corner"/>
+            <Enumeration value="1" label="FRONT_RIGHT" shortDescription="front right corner"/>
+            <Enumeration value="2" label="REAR_LEFT" shortDescription="rear left corner"/>
+            <Enumeration value="3" label="REAR_RIGHT" shortDescription="rear right corner"/>
+            <Enumeration value="4" label="ALL" shortDescription="Every steerable corner"/>
+          </EnumerationList>
+        </EnumeratedArgumentType>
+        <FloatArgumentType name="inject_steer_torque_fault__severity" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <EnumeratedArgumentType name="inject_wheel_sink_fault__wheel">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="FRONT_LEFT" shortDescription="front left wheel"/>
+            <Enumeration value="1" label="FRONT_RIGHT" shortDescription="front right wheel"/>
+            <Enumeration value="2" label="MID_LEFT" shortDescription="mid left wheel"/>
+            <Enumeration value="3" label="MID_RIGHT" shortDescription="mid right wheel"/>
+            <Enumeration value="4" label="REAR_LEFT" shortDescription="rear left wheel"/>
+            <Enumeration value="5" label="REAR_RIGHT" shortDescription="rear right wheel"/>
+            <Enumeration value="6" label="ALL" shortDescription="Every wheel"/>
+          </EnumerationList>
+        </EnumeratedArgumentType>
+        <FloatArgumentType name="inject_wheel_sink_fault__severity" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <EnumeratedArgumentType name="inject_wheel_slip_fault__wheel">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="FRONT_LEFT" shortDescription="front left wheel"/>
+            <Enumeration value="1" label="FRONT_RIGHT" shortDescription="front right wheel"/>
+            <Enumeration value="2" label="MID_LEFT" shortDescription="mid left wheel"/>
+            <Enumeration value="3" label="MID_RIGHT" shortDescription="mid right wheel"/>
+            <Enumeration value="4" label="REAR_LEFT" shortDescription="rear left wheel"/>
+            <Enumeration value="5" label="REAR_RIGHT" shortDescription="rear right wheel"/>
+            <Enumeration value="6" label="ALL" shortDescription="Every wheel"/>
+          </EnumerationList>
+        </EnumeratedArgumentType>
+        <FloatArgumentType name="inject_wheel_slip_fault__severity" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <EnumeratedArgumentType name="inject_wheel_stuck_fault__wheel">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="FRONT_LEFT" shortDescription="front left wheel"/>
+            <Enumeration value="1" label="FRONT_RIGHT" shortDescription="front right wheel"/>
+            <Enumeration value="2" label="MID_LEFT" shortDescription="mid left wheel"/>
+            <Enumeration value="3" label="MID_RIGHT" shortDescription="mid right wheel"/>
+            <Enumeration value="4" label="REAR_LEFT" shortDescription="rear left wheel"/>
+            <Enumeration value="5" label="REAR_RIGHT" shortDescription="rear right wheel"/>
+            <Enumeration value="6" label="ALL" shortDescription="Every wheel"/>
+          </EnumerationList>
+        </EnumeratedArgumentType>
+        <FloatArgumentType name="inject_wheel_stuck_fault__severity" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+        <EnumeratedArgumentType name="inject_wheel_torque_fault__wheel">
+          <IntegerDataEncoding sizeInBits="8" encoding="unsigned"/>
+          <EnumerationList>
+            <Enumeration value="0" label="FRONT_LEFT" shortDescription="front left wheel"/>
+            <Enumeration value="1" label="FRONT_RIGHT" shortDescription="front right wheel"/>
+            <Enumeration value="2" label="MID_LEFT" shortDescription="mid left wheel"/>
+            <Enumeration value="3" label="MID_RIGHT" shortDescription="mid right wheel"/>
+            <Enumeration value="4" label="REAR_LEFT" shortDescription="rear left wheel"/>
+            <Enumeration value="5" label="REAR_RIGHT" shortDescription="rear right wheel"/>
+            <Enumeration value="6" label="ALL" shortDescription="Every wheel"/>
+          </EnumerationList>
+        </EnumeratedArgumentType>
+        <FloatArgumentType name="inject_wheel_torque_fault__severity" sizeInBits="32">
+          <FloatDataEncoding sizeInBits="32" encoding="IEEE754_1985" byteOrder="mostSignificantByteFirst"/>
+          <ValidRangeSet validRangeAppliesToCalibrated="true">
+            <ValidRange minInclusive="0.0" maxInclusive="1.0"/>
+          </ValidRangeSet>
+        </FloatArgumentType>
+      </ArgumentTypeSet>
+      <MetaCommandSet>
+        <MetaCommand name="clear_faults" abstract="false" shortDescription="[SIM] Restore every subsystem to nominal">
+          <CommandContainer name="clear_faults">
+            <EntryList>
+              <FixedValueEntry binaryValue="636c6561725f6661756c7473" sizeInBits="96" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_battery_fault" abstract="false" shortDescription="[SIM] Drain the battery with a parasitic load">
+          <ArgumentList>
+            <Argument name="severity" argumentTypeRef="inject_battery_fault__severity"/>
+          </ArgumentList>
+          <CommandContainer name="inject_battery_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f626174746572795f6661756c74" sizeInBits="160" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="severity">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_camera_fault" abstract="false" shortDescription="[SIM] Lose and/or corrupt camera frames">
+          <ArgumentList>
+            <Argument name="loss" argumentTypeRef="inject_camera_fault__loss"/>
+            <Argument name="noise" argumentTypeRef="inject_camera_fault__noise"/>
+          </ArgumentList>
+          <CommandContainer name="inject_camera_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f63616d6572615f6661756c74" sizeInBits="152" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="loss">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="noise">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_comms_fault" abstract="false" shortDescription="[SIM] Lose telemetry and/or telecommands">
+          <ArgumentList>
+            <Argument name="tm_loss" argumentTypeRef="inject_comms_fault__tm_loss"/>
+            <Argument name="tc_loss" argumentTypeRef="inject_comms_fault__tc_loss"/>
+          </ArgumentList>
+          <CommandContainer name="inject_comms_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f636f6d6d735f6661756c74" sizeInBits="144" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="tm_loss">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="tc_loss">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_imu_fault" abstract="false" shortDescription="[SIM] Bias and/or roughen the inertial measurement unit">
+          <ArgumentList>
+            <Argument name="bias" argumentTypeRef="inject_imu_fault__bias"/>
+            <Argument name="noise" argumentTypeRef="inject_imu_fault__noise"/>
+          </ArgumentList>
+          <CommandContainer name="inject_imu_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f696d755f6661756c74" sizeInBits="128" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="bias">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="noise">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_steer_stuck_fault" abstract="false" shortDescription="[SIM] Freeze a corner at a fixed steer angle">
+          <ArgumentList>
+            <Argument name="corner" argumentTypeRef="inject_steer_stuck_fault__corner"/>
+            <Argument name="angle" argumentTypeRef="inject_steer_stuck_fault__angle"/>
+          </ArgumentList>
+          <CommandContainer name="inject_steer_stuck_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f73746565725f737475636b5f6661756c74" sizeInBits="192" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="corner">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="angle">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_steer_torque_fault" abstract="false" shortDescription="[SIM] Weaken a steer actuator by limiting its torque">
+          <ArgumentList>
+            <Argument name="corner" argumentTypeRef="inject_steer_torque_fault__corner"/>
+            <Argument name="severity" argumentTypeRef="inject_steer_torque_fault__severity"/>
+          </ArgumentList>
+          <CommandContainer name="inject_steer_torque_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f73746565725f746f727175655f6661756c74" sizeInBits="200" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="corner">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="severity">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_wheel_sink_fault" abstract="false" shortDescription="[SIM] Sink a wheel into very soft ground">
+          <ArgumentList>
+            <Argument name="wheel" argumentTypeRef="inject_wheel_sink_fault__wheel"/>
+            <Argument name="severity" argumentTypeRef="inject_wheel_sink_fault__severity"/>
+          </ArgumentList>
+          <CommandContainer name="inject_wheel_sink_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f776865656c5f73696e6b5f6661756c74" sizeInBits="184" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="wheel">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="severity">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_wheel_slip_fault" abstract="false" shortDescription="[SIM] Take a wheel's grip away by lowering its ground friction">
+          <ArgumentList>
+            <Argument name="wheel" argumentTypeRef="inject_wheel_slip_fault__wheel"/>
+            <Argument name="severity" argumentTypeRef="inject_wheel_slip_fault__severity"/>
+          </ArgumentList>
+          <CommandContainer name="inject_wheel_slip_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f776865656c5f736c69705f6661756c74" sizeInBits="184" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="wheel">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="severity">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_wheel_stuck_fault" abstract="false" shortDescription="[SIM] Seize a wheel by raising its joint damping">
+          <ArgumentList>
+            <Argument name="wheel" argumentTypeRef="inject_wheel_stuck_fault__wheel"/>
+            <Argument name="severity" argumentTypeRef="inject_wheel_stuck_fault__severity"/>
+          </ArgumentList>
+          <CommandContainer name="inject_wheel_stuck_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f776865656c5f737475636b5f6661756c74" sizeInBits="192" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="wheel">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="severity">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+        <MetaCommand name="inject_wheel_torque_fault" abstract="false" shortDescription="[SIM] Weaken a drive motor by limiting its torque">
+          <ArgumentList>
+            <Argument name="wheel" argumentTypeRef="inject_wheel_torque_fault__wheel"/>
+            <Argument name="severity" argumentTypeRef="inject_wheel_torque_fault__severity"/>
+          </ArgumentList>
+          <CommandContainer name="inject_wheel_torque_fault">
+            <EntryList>
+              <FixedValueEntry binaryValue="696e6a6563745f776865656c5f746f727175655f6661756c74" sizeInBits="200" name="command_name">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </FixedValueEntry>
+              <ArgumentRefEntry argumentRef="wheel">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+              <ArgumentRefEntry argumentRef="severity">
+                <LocationInContainerInBits referenceLocation="previousEntry">
+                  <FixedValue>0</FixedValue>
+                </LocationInContainerInBits>
+              </ArgumentRefEntry>
+            </EntryList>
+          </CommandContainer>
+          <DefaultSignificance consequenceLevel="normal"/>
+          <VerifierSet/>
+        </MetaCommand>
+      </MetaCommandSet>
+    </CommandMetaData>
+  </SpaceSystem>
   <SpaceSystem name="motor">
     <TelemetryMetaData/>
     <CommandMetaData>

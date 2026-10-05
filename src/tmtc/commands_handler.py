@@ -28,8 +28,26 @@ class CommandsHandler():
 
 
     def _config_tc_socket(self, yamcs_instance_conf):
+        address = yamcs_instance_conf["tc_receive_address"]
+        port = yamcs_instance_conf["tc_receive_port"]
+
         self._tc_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._tc_socket.bind((yamcs_instance_conf["tc_receive_address"], yamcs_instance_conf["tc_receive_port"]))
+        try:
+            self._tc_socket.bind((address, port))
+        except OSError as exc:
+            # Almost always an earlier simulator still holding the port - including one merely
+            # suspended with Ctrl-Z, which keeps its sockets. Say so here: the bare OSError surfaces
+            # 40 lines deep in a Kit crash dump, where it reads like a fault in the rover code.
+            # NOT fixed with SO_REUSEADDR on purpose: two processes bound to one telecommand port
+            # would split the uplink between them, which is far worse than refusing to start.
+            raise OSError(
+                f"Cannot bind the telecommand port {address}:{port} ({exc.strerror}).\n"
+                f"  Another simulator is probably still running or suspended. Find it with:\n"
+                f"    ps -eo pid,stat,cmd | grep run_perseverance\n"
+                f"  A 'T' in the STAT column means stopped, not dead - it still owns the port.\n"
+                f"  Then: kill -9 <pid>"
+            ) from exc
+
         self._tc_socket.settimeout(self.SOCKET_TIMEOUT_SEC)
         print("UDP bound to:", self._tc_socket.getsockname())
 
@@ -56,7 +74,12 @@ class CommandsHandler():
 
             decoded = MdbParsingService.decode_tc_payload(tc_data, self._registry)
             if decoded is None:
-                return
+                # Skip the packet, do not leave the loop. Returning here killed the listener thread
+                # on the first unrecognised payload, which silently deafened the rover to every
+                # later command - and the usual cause is a stale mdb on one side of the link, so the
+                # symptom looked nothing like the cause.
+                print(f"Undecodable TC payload from {addr}: {tc_data[:32]!r}")
+                continue
 
             command = self._commands_catalogue.get(decoded["full_name"])
             if command is None:

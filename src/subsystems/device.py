@@ -14,8 +14,14 @@ class PowerState(StrEnum):
     ON = "ON"
 
 class HealthState(IntEnum):
+    # DEGRADED sits between the two: the device still works, just not to spec. It exists so a
+    # weakened actuator can be reported honestly without reading as a dead one - FAULT is an
+    # interlock condition, DEGRADED deliberately is not.
+    # The numbers are identifiers, not a severity ranking: DEGRADED was appended rather than
+    # inserted so no stored value changes meaning.
     NOMINAL = 0
     FAULT = 1
+    DEGRADED = 2
 
 class CommonDevice(StrEnum):
     MOTOR_CONTROLLER = "MOTOR_CONTROLLER"

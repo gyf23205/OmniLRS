@@ -65,6 +65,7 @@ class PowerModel(RobotPhysicsModel):
         self._rover_position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._sun_position: Tuple[float, float, float] = (0.0, -10.0, 0.0)
         self._battery_voltage_v: float = self.BATTERY_VOLTAGE_CURVE[-1][1]
+        self._parasitic_load_w: float = 0.0  # fault injection only; see set_parasitic_load
     
     def initialize(self, *, battery_capacity_wh:float, battery_charge_wh:float,
 				   solar_panel_max_power:float, solar_panel_state:SolarPanelState, 
@@ -105,7 +106,11 @@ class PowerModel(RobotPhysicsModel):
         # sum of currents
         battery_voltage = self._battery_voltage()
         device_current_at_battery = (regulated_power / self.PM.DC_DC_EFFICIENCY) / battery_voltage
-        total_current_out = device_current_at_battery + sum(motor_currents)
+        # An injected parasitic load draws off the battery like anything else, so it belongs in the
+        # measured current too. Without this net_power and total_current_out disagree: one says 40 W
+        # more is leaving the pack, the other says the current never changed.
+        parasitic_current = getattr(self, "_parasitic_load_w", 0.0) / battery_voltage
+        total_current_out = device_current_at_battery + sum(motor_currents) + parasitic_current
         status: Dict[str, float | Dict[str, float] | Sequence[float]] = {
             "net_power": self._solar_input_power - self._total_load_power(),
             "solar_input_current_measured": self._measured_solar_input_current(),
@@ -162,11 +167,24 @@ class PowerModel(RobotPhysicsModel):
         else:
             return hi
 
+    def set_parasitic_load(self, watts: float) -> None:
+        """
+        An unmodelled load drawing straight off the battery - a short, a stuck heater.
+
+        Used by fault injection. Modelled as a real load rather than by writing _battery_charge_wh
+        directly, so it shows up everywhere it should: net_power, total_current_out, and a
+        battery_charge curve that visibly bends.
+        """
+        self._parasitic_load_w = max(0.0, float(watts))
+
     def _total_load_power(self) -> float:
         regulated_load = sum(self._device_power(name) for name in self._devices)
         battery_power_for_regulated = regulated_load / self.PM.DC_DC_EFFICIENCY
         motor_power = self._motor_power_w * self._motor_count if self._is_in_motor_state else 0.0
-        return battery_power_for_regulated + motor_power
+        # getattr keeps a model built before this existed working, and keeps a healthy rover at
+        # exactly its old numbers rather than "old numbers plus zero".
+        parasitic = getattr(self, "_parasitic_load_w", 0.0)
+        return battery_power_for_regulated + motor_power + parasitic
 
     def _compute_view_factor(
         self,

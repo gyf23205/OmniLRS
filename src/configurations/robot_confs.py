@@ -40,6 +40,11 @@ class RobotParameters:
     geometry: Dict = field(default_factory=dict)
     # Closed-loop drive controller gains and tolerances.
     drive_control: Dict = field(default_factory=dict)
+    # Reference torques used only to size injected faults; never written to a healthy joint.
+    fault_injection: Dict = field(default_factory=dict)
+    dataset: Dict = field(default_factory=dict)
+    # Onboard navigation EKF: imu axis map, noise, torque model, cusum. See estimation/nav_filter.py.
+    estimator: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.usd_path = os.path.join(os.getcwd(), self.usd_path)

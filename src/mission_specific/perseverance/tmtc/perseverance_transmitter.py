@@ -45,6 +45,8 @@ class PerseveranceTransmitter:
         robot_name,
         parameters_conf,
         drive_controller=None,
+        fault_injector=None,
+        nav_filter=None,
     ):
         self._transmit = transmit_func
         self._robot: Robot = robot
@@ -53,6 +55,8 @@ class PerseveranceTransmitter:
         self._parameters_conf = parameters_conf
         self._robot_name = robot_name
         self._drive = drive_controller
+        self._faults = fault_injector
+        self._nav = nav_filter
         self._active_command = "none"
 
     # ── command echo and execution progress ──────────────────────────────────────
@@ -83,6 +87,43 @@ class PerseveranceTransmitter:
             {"x": float(target_x), "y": float(target_y)},
         )
 
+    # ── injected faults ──────────────────────────────────────────────────────────
+    def transmit_fault_state(self):
+        """
+        Downlink what has been broken on purpose.
+
+        Sent so that a run in the archive can be read months later without guessing why the rover
+        crabbed: the injected state is recorded alongside its consequences.
+        """
+        if self._faults is None:
+            return
+
+        self._transmit(self._parameters_conf["faults_active"], self._faults.active_faults)
+        self._transmit(self._parameters_conf["wheel_torque_limit"], self._faults.wheel_torque_limits)
+        self._transmit(self._parameters_conf["wheel_damping_factor"], self._faults.wheel_damping_factors)
+        self._transmit(self._parameters_conf["wheel_friction"], self._faults.wheel_frictions)
+        self._transmit(self._parameters_conf["wheel_sinkage"], self._faults.wheel_sinkages)
+        self._transmit(self._parameters_conf["steer_torque_limit"], self._faults.steer_torque_limits)
+
+        # Health is ground truth here: the injector knows exactly what it broke, so it can name the
+        # individual actuator instead of flagging the whole subsystem. Nothing is inferred from
+        # dynamics - see the fault injector for why no detection logic is pretended.
+        self._transmit(self._parameters_conf["wheel_health"], self._faults.wheel_health)
+        self._transmit(self._parameters_conf["steer_health"], self._faults.steer_health)
+        self._transmit(self._parameters_conf["motor_controller_health"], self._faults.motor_controller_health)
+        self._transmit(self._parameters_conf["imu_health"], self._faults.imu_health)
+        self._transmit(self._parameters_conf["camera_health"], self._faults.camera_health)
+        self._transmit(self._parameters_conf["battery_health"], self._faults.battery_health)
+        self._transmit(self._parameters_conf["comms_health"], self._faults.comms_health)
+
+        self._transmit(self._parameters_conf["parasitic_load"], float(self._faults.parasitic_load))
+        dropped = self._faults.dropped_counts
+        self._transmit(self._parameters_conf["dropped"], {
+            "tm": int(dropped["tm"]),
+            "tc": int(dropped["tc"]),
+            "camera_frames": int(dropped["camera_frames"]),
+        })
+
     # ── pose / motion ────────────────────────────────────────────────────────────
     def transmit_pose_of_base_link(self):
         position, orientation = self._robot_RG.get_pose_of_base_link()
@@ -98,6 +139,27 @@ class PerseveranceTransmitter:
         angles = self._robot.get_wheels_joint_angles()
         self._transform_joint_angles(angles)
         self._transmit(self._parameters_conf["motor_encoder"], angles)
+
+    def transmit_motor_effort(self):
+        """
+        Downlink the measured torque on each drive joint, in WHEEL_NAMES order.
+
+        A genuine reading, so it sits beside the encoders rather than under /Rover/faults. It is what
+        tells a wheel spinning on ice (low effort) from one grinding through soft soil (high effort):
+        both show the encoder running ahead of the pose.
+        """
+        efforts = self._robot.get_wheel_joint_efforts(list(self.WHEEL_NAMES))
+        self._transmit(self._parameters_conf["motor_effort"], efforts)
+
+    def transmit_steer_encoder(self):
+        """
+        Downlink the measured corner steer angles in degrees.
+
+        Sent as a real angle rather than encoder counts because the sign matters: a corner stuck at
+        -20 deg and one stuck at +20 deg send the rover opposite ways.
+        """
+        angles = self._robot.get_steer_angles()
+        self._transmit(self._parameters_conf["steer_encoder"], [math.degrees(a) for a in angles])
 
     def _transform_joint_angles(self, angles):
         """Wrap to one revolution and scale to the 10-bit encoder counts the MDB declares."""
@@ -116,6 +178,29 @@ class PerseveranceTransmitter:
         self._transmit(self._parameters_conf["imu_accelerometer"], imu_accelerometer)
         self._transmit(self._parameters_conf["imu_gyroscope"], imu_gyroscope)
         self._transmit(self._parameters_conf["imu_orientation"], orientation)
+
+    # ── onboard navigation filter ────────────────────────────────────────────────
+    ESTIMATOR_FIELDS = (
+        "pose", "motion", "bias", "imu_residual", "nis",
+        "wheel_rolling_mean", "wheel_rolling_max", "wheel_sideslip_mean", "wheel_sideslip_max",
+        "wheel_effort_mean", "wheel_effort_max", "wheel_tracking_mean", "wheel_tracking_max",
+        "cusum_alarm", "reacquisitions",
+    )
+
+    def transmit_estimator(self):
+        """
+        Downlink the navigation filter's last closed window.
+
+        A field the filter did not produce is skipped rather than zero-filled - the torque residual
+        before the torque model is calibrated, or anything in the first second of an episode - so a
+        missing value reads as missing, not as a healthy zero.
+        """
+        if self._nav is None:
+            return
+        snapshot = self._nav.telemetry()
+        for field in self.ESTIMATOR_FIELDS:
+            if field in snapshot:
+                self._transmit(self._parameters_conf[f"estimator_{field}"], snapshot[field])
 
     # ── subsystems ───────────────────────────────────────────────────────────────
     def transmit_power_info(self, interval_s):

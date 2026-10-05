@@ -7,6 +7,7 @@ __email__ = "ljburtz@jaops.com"
 __status__ = "development"
 
 import math
+import random
 import threading
 import time
 from typing import Dict, List, Tuple
@@ -21,7 +22,7 @@ import omni.graph.core as og
 from isaacsim.core.utils.rotations import quat_to_rot_matrix
 from omni.isaac.dynamic_control import _dynamic_control
 from isaacsim.core.prims import SingleRigidPrim, SingleXFormPrim, RigidPrim
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from WorldBuilders.pxr_utils import addDefaultOps, createXform, createObject, setDefaultOpsTyped
 from src.configurations.robot_confs import RobotManagerConf
@@ -213,6 +214,9 @@ class RobotManager:
         )
         rrg.initialize(world)
         self.robot_RG = rrg
+        # The robot reaches its own links' velocities, contact forces and applied forces through
+        # this, so a fault injector can keep talking to the Robot alone.
+        self.robot.rigid_group = rrg
 
     def reset_robot(self) -> None:
         """
@@ -284,6 +288,39 @@ class Robot:
         # Name-keyed dofs for per-wheel drive and corner steering; see _init_named_dofs.
         self._wheel_dofs = None
         self._steer_dofs = None
+        # Tensor-api articulation view for measured joint forces, built lazily; see get_wheel_joint_efforts.
+        self._force_view = None
+        self._force_view_failed = False
+        self._force_dof_index: Dict[str, int] = {}
+        # Joint prims by name, for drive limits; and forced steer angles. See _init_joint_prims.
+        self._joint_prims = None
+        self._steer_overrides: Dict[str, float] = {}
+        # Seized wheels: wheel name -> damping factor, and the damping the usd authored for each
+        # drive joint before anything touched it. See set_wheel_damping_factor.
+        self._wheel_damping_factors: Dict[str, float] = {}
+        self._nominal_wheel_damping: Dict[str, float] = {}
+        # Per-wheel physics materials for slip faults, by wheel name. See install_wheel_materials.
+        self._wheel_materials: Dict[str, UsdPhysics.MaterialAPI] = {}
+        self._nominal_wheel_friction = None
+        # Per-wheel collider rest offsets for sinkage faults, and what they were before any fault.
+        # See install_wheel_sinkage.
+        self._wheel_rest_offsets: Dict[str, list] = {}
+        self._nominal_wheel_rest_offsets: Dict[str, float] = {}
+        # The RobotRigidGroup for this robot's links, set by RobotManager.add_RRG.
+        self.rigid_group = None
+        # Simulated sensor degradation, set by the mission's fault injector. Zero means untouched,
+        # and the accessors below skip the whole path in that case so a healthy run is unaffected.
+        self._imu_corruption = {
+            "accel_bias": 0.0, "gyro_bias": 0.0, "orientation_bias_deg": 0.0,
+            "accel_noise": 0.0, "gyro_noise": 0.0,
+        }
+        self._camera_noise = 0.0
+        # (clean, measured) from the last get_imu_readings call; see there.
+        self._last_imu = None
+        # Seeded from the injector so a faulted run replays identically. random for scalars,
+        # numpy for whole image arrays - drawing a per-pixel gaussian in python would be far too slow.
+        self._fault_rng = random.Random(0)
+        self._fault_np_rng = np.random.default_rng(0)
         self._camera_conf = camera_conf
         self._cameras = {}
         self._depth_cameras = {}
@@ -372,6 +409,14 @@ class Robot:
                 rotation=Gf.Quatd(*orientation),
                 scale=Gf.Vec3d(self.scale, self.scale, self.scale),
             )
+        # Before anything steps the simulation. PhysX validates a collider's rest and contact
+        # offsets as they are authored, and rejects a finite rest offset next to an auto (-inf)
+        # contact offset - which is exactly the state a later write passes through, one error per
+        # wheel. Authoring both here, while the rover is still just usd, means PhysX parses the
+        # wheels once, already valid. _initialize_cameras() below pumps the app, which is what
+        # triggers that first parse.
+        self.install_wheel_sinkage()
+
         self.edit_graphs()
         self._initialize_cameras()
 
@@ -401,7 +446,17 @@ class Robot:
             self._depth_cameras[res].add_distance_to_image_plane_to_frame()
 
     def get_rgba_camera_view(self, resolution) -> np.ndarray:
-        return self._cameras[resolution].get_rgba()
+        frame = self._cameras[resolution].get_rgba()
+
+        # An injected camera fault grains the image. Only the colour channels: noise on alpha would
+        # make the frame translucent rather than noisy. The camera returns an empty array until it
+        # has rendered once, so guard on size rather than assuming a shape.
+        if self._camera_noise and getattr(frame, "size", 0):
+            noise = self._fault_np_rng.normal(0.0, self._camera_noise, size=frame[..., :3].shape)
+            frame = np.array(frame, dtype=float)
+            frame[..., :3] = np.clip(frame[..., :3] + noise, 0.0, 255.0)
+
+        return frame
     
     def get_depth_camera_view(self, resolution) -> np.ndarray:
         """Returns depth image in meters as (H, W) float32 array."""
@@ -423,6 +478,13 @@ class Robot:
         orientation = sensor_reading.orientation # x, y, z, w
         xyz_orientation = transform_orientation_from_xyzw_into_xyz(orientation) 
         orientation = {"roll":-float(xyz_orientation[0]), "pitch":-float(xyz_orientation[1]), "yaw":float(xyz_orientation[2])}
+
+        # Snapshot both halves before and after corruption. The dataset recorder reads this to
+        # supervise on how wrong the sensor is, not merely on a label saying that it is broken; on a
+        # healthy imu the two are equal and the residual is zero.
+        clean = (dict(linear_acceleration), dict(angular_velocity), dict(orientation))
+        self._corrupt_imu(linear_acceleration, angular_velocity, orientation)
+        self._last_imu = (clean, (dict(linear_acceleration), dict(angular_velocity), dict(orientation)))
 
         # print(linear_acceleration, angular_velocity, orientation)
         return linear_acceleration, angular_velocity, orientation
@@ -540,7 +602,10 @@ class Robot:
         for wheel_name, velocity in velocities.items():
             dof = self._wheel_dofs.get(wheel_name)
             if dof is not None:
-                self.dc.set_dof_velocity_target(dof, float(velocity))
+                # A seized wheel's target is pulled toward zero on every write, for the same reason
+                # the steer override is: the controller rewrites every target each physics step.
+                velocity = float(velocity) / self._wheel_damping_factors.get(wheel_name, 1.0)
+                self.dc.set_dof_velocity_target(dof, velocity)
 
     def set_steer_angles(self, angles: Dict[str, float]) -> None:
         """
@@ -554,13 +619,481 @@ class Robot:
 
         for wheel_name, angle in angles.items():
             dof = self._steer_dofs.get(wheel_name)
-            if dof is not None:
-                self.dc.set_dof_position_target(dof, float(angle))
+            if dof is None:
+                continue
+            # A stuck joint ignores whoever is steering. The override has to be applied here, on
+            # every write, because the drive controller rewrites all four targets each physics step.
+            angle = self._steer_overrides.get(wheel_name, angle)
+            self.dc.set_dof_position_target(dof, float(angle))
+
+    def get_steer_angles(self) -> List[float]:
+        """
+        Measured steer joint angles in radians, in the order steer_joints lists them.
+
+        The steering counterpart of get_wheels_joint_angles. Measured, not commanded: it is what
+        makes a stuck or weakened steer joint visible from the ground.
+
+        Always one entry per configured steer joint, padded with 0.0 for any that failed to resolve.
+        The mdb declares a fixed-length array, so a short list would be rejected at downlink and
+        cost the whole parameter rather than the one joint (_init_named_dofs already warns).
+        """
+        self._init_named_dofs()
+
+        angles = []
+        for joint_name in self._steer_joint_names:
+            dof = self._steer_dofs.get(joint_name.replace("steer_joint_", ""))
+            angles.append(float(self.dc.get_dof_position(dof)) if dof is not None else 0.0)
+
+        return angles
 
     def has_steering(self) -> bool:
         """True when the robot config declared steer joints and they resolved to dofs."""
         self._init_named_dofs()
         return bool(self._steer_dofs)
+
+    # ── joint drive limits and overrides ─────────────────────────────────────────
+    # These model a degraded actuator: a torque limit makes a motor too weak to do its job, an
+    # override pins a joint where it should not be. Both are deliberately generic — which joint is
+    # faulted, and what a fault "severity" means, belongs to the mission-specific fault injector.
+
+    def set_joint_max_efforts(self, efforts: Dict[str, float]) -> None:
+        """
+        Set the angular drive force limit on named joints, keyed by joint name.
+
+        Names are the joint prim names as authored, e.g. "drive_joint_mid_left" or
+        "steer_joint_front_left" — not the wheel names set_wheel_velocities uses, because both
+        joint families share the wheel names and the limits apply to either.
+
+        Written through the usd PhysicsDriveAPI rather than dynamic_control: the attribute is
+        stage-level, so it survives world.reset() and shows up in the property panel. Passing
+        float("inf") restores the unlimited default the usd ships with.
+        """
+        self._init_joint_prims()
+
+        for joint_name, max_effort in efforts.items():
+            drive = self._angular_drive(joint_name)
+            if drive is not None:
+                drive.CreateMaxForceAttr().Set(float(max_effort))
+
+    def get_joint_max_efforts(self, joint_names: List[str]) -> Dict[str, float]:
+        """
+        Read back the angular drive force limits.
+
+        An unauthored limit reads as inf, which is what the usd means by leaving maxForce out.
+        """
+        self._init_joint_prims()
+
+        efforts = {}
+        for joint_name in joint_names:
+            drive = self._angular_drive(joint_name)
+            if drive is None:
+                continue
+            attribute = drive.GetMaxForceAttr()
+            if attribute and attribute.HasAuthoredValue():
+                efforts[joint_name] = float(attribute.Get())
+            else:
+                efforts[joint_name] = float("inf")
+
+        return efforts
+
+    def set_steer_override(self, wheel_name: str, angle: float = None) -> None:
+        """
+        Pin one steer joint to a fixed angle in radians, or pass None to release it.
+
+        See set_steer_angles: the override is re-applied on every write, so it holds against a
+        controller that recomputes its targets at the physics rate.
+        """
+        if angle is None:
+            self._steer_overrides.pop(wheel_name, None)
+        else:
+            self._steer_overrides[wheel_name] = float(angle)
+
+    def clear_steer_overrides(self) -> None:
+        self._steer_overrides.clear()
+
+    def set_wheel_damping_factor(self, wheel_name: str, factor: float = 1.0) -> None:
+        """
+        Seize one drive joint by multiplying its drive damping, keyed by wheel name. 1.0 releases it.
+
+        The drive joints are velocity drives (stiffness 0), so their damping D is the gain pulling
+        the wheel toward its commanded speed, not a resistance: raising it alone would make the
+        wheel track the command more stiffly, the opposite of stuck. A seized bearing is a passive
+        viscous brake B on top of the motor, and the two sum into one drive exactly:
+
+            D (w_cmd - w) - B w  =  (D + B) (w_cmd * D / (D + B) - w)
+
+        So with factor = (D + B) / D the damping becomes D * factor and every velocity target is
+        divided by factor (applied in set_wheel_velocities). At a large factor the wheel is held
+        near zero and resists being dragged by the other five.
+
+        The nominal damping is read from the usd on first touch and written back on release, so a
+        seize-then-release is an exact round trip. Note a drive torque limit (set_joint_max_efforts)
+        caps the combined drive, brake included.
+        """
+        self._init_joint_prims()
+        joint_name = f"drive_joint_{wheel_name}"
+        drive = self._angular_drive(joint_name)
+        if drive is None:
+            return
+
+        if joint_name not in self._nominal_wheel_damping:
+            self._nominal_wheel_damping[joint_name] = float(drive.GetDampingAttr().Get() or 0.0)
+
+        factor = max(1.0, float(factor))
+        drive.GetDampingAttr().Set(self._nominal_wheel_damping[joint_name] * factor)
+        if factor == 1.0:
+            self._wheel_damping_factors.pop(wheel_name, None)
+        else:
+            self._wheel_damping_factors[wheel_name] = factor
+
+    def install_wheel_materials(self, friction: float) -> None:
+        """
+        Give every wheel's colliders its own physics material, at the given friction.
+
+        Call once right after the robot is loaded, before physics has stepped. The usd binds no
+        physics material anywhere, so contacts use the PhysX default; pass that default here and a
+        healthy run is unchanged. Binding up front matters: PhysX picks up a new binding when it
+        parses the stage, but may not re-parse a running shape, whereas changing the friction
+        values on an already-bound material is applied live - which is all set_wheel_friction does.
+
+        The combine mode is "min", so the contact uses the lower of the wheel and ground friction.
+        PhysX resolves the combine mode by priority (max > multiply > min > average) and unbound
+        ground uses average, so the wheel's setting wins: a slippery wheel stays slippery rather
+        than being averaged back up. With a healthy wheel equal to the ground's, min and average
+        give the same number.
+        """
+        from pxr import PhysxSchema  # Kit-only schema; imported here like the other runtime deps
+
+        self.stage = omni.usd.get_context().get_stage()
+        self._nominal_wheel_friction = float(friction)
+        materials_root = os.path.join(self.robots_root, "FaultMaterials", self.robot_name.strip("/"))
+
+        for wheel_name in self._drive_wheel_names():
+            colliders = self._wheel_colliders(wheel_name)
+            if not colliders:
+                print(f"[warn] no colliders under wheel_{wheel_name}; slip faults cannot reach it")
+                continue
+
+            material = UsdShade.Material.Define(self.stage, f"{materials_root}/wheel_{wheel_name}")
+            prim = material.GetPrim()
+            physics = UsdPhysics.MaterialAPI.Apply(prim)
+            physics.CreateStaticFrictionAttr().Set(self._nominal_wheel_friction)
+            physics.CreateDynamicFrictionAttr().Set(self._nominal_wheel_friction)
+            physics.CreateRestitutionAttr().Set(0.0)
+            physx = PhysxSchema.PhysxMaterialAPI.Apply(prim)
+            physx.CreateFrictionCombineModeAttr().Set("min")
+
+            for collider in colliders:
+                UsdShade.MaterialBindingAPI.Apply(collider).Bind(
+                    material, UsdShade.Tokens.weakerThanDescendants, "physics",
+                )
+            self._wheel_materials[wheel_name] = physics
+
+    def set_wheel_friction(self, wheel_name: str, friction: float) -> None:
+        """
+        Set static and dynamic friction on one wheel's material, keyed by wheel name.
+
+        Only changes values on the material install_wheel_materials bound, so it is safe mid-run.
+        """
+        physics = self._wheel_materials.get(wheel_name)
+        if physics is None:
+            print(f"[warn] wheel '{wheel_name}' has no fault material; call install_wheel_materials "
+                  f"after loading the robot")
+            return
+
+        friction = max(0.0, float(friction))
+        physics.GetStaticFrictionAttr().Set(friction)
+        physics.GetDynamicFrictionAttr().Set(friction)
+
+    def reset_wheel_friction(self) -> None:
+        """Put every installed wheel material back to the friction it was installed with."""
+        for wheel_name in self._wheel_materials:
+            self.set_wheel_friction(wheel_name, self._nominal_wheel_friction)
+
+    def install_wheel_sinkage(self, contact_margin_m: float = 0.02) -> None:
+        """
+        Make each wheel collider's rest offset explicit, so a sinkage fault can change it mid-run.
+
+        Called from load() before the wheels are first parsed, and again by a mission's fault
+        injector at startup, which is a no-op re-read for a robot that came through load().
+        The rest offset is the distance at which PhysX lets two shapes come to rest: 0 means
+        touching, and a negative value lets the wheel settle that far INTO the ground, which is
+        how a sunk wheel is modelled geometrically. An authored finite value is kept as the nominal;
+        an unauthored one (auto, which is 0 for rigid bodies) is written as 0.
+
+        PhysX rejects a finite rest offset next to an auto (-inf) contact offset, and requires the
+        rest offset to be the smaller of the two. So a contact offset that is unauthored, or not
+        above the nominal rest offset, is written as nominal + contact_margin_m. Sinkage only lowers
+        the rest offset, so the pair stays valid mid-run.
+        """
+        from pxr import PhysxSchema
+
+        self.stage = omni.usd.get_context().get_stage()
+        for wheel_name in self._drive_wheel_names():
+            colliders = self._wheel_colliders(wheel_name)
+            if not colliders:
+                print(f"[warn] no colliders under wheel_{wheel_name}; sinkage faults cannot reach it")
+                continue
+
+            attributes = []
+            nominal = 0.0
+            for collider in colliders:
+                collision_api = PhysxSchema.PhysxCollisionAPI.Apply(collider)
+                attribute = collision_api.CreateRestOffsetAttr()
+                value = attribute.Get() if attribute.HasAuthoredValue() else None
+                if value is not None and math.isfinite(value):
+                    nominal = float(value)
+                attribute.Set(nominal)
+                attributes.append(attribute)
+
+                contact = collision_api.CreateContactOffsetAttr()
+                contact_value = contact.Get() if contact.HasAuthoredValue() else None
+                if contact_value is None or not math.isfinite(contact_value) or contact_value <= nominal:
+                    contact.Set(nominal + contact_margin_m)
+
+            self._wheel_rest_offsets[wheel_name] = attributes
+            self._nominal_wheel_rest_offsets[wheel_name] = nominal
+
+    def set_wheel_sinkage(self, wheel_name: str, depth_m: float) -> None:
+        """
+        Let one wheel settle depth_m into the ground (0 restores it), keyed by wheel name.
+
+        Only changes the rest offset install_wheel_sinkage authored, so it is safe mid-run. Geometry
+        only: the drag a sunk wheel feels is apply_wheel_resistance, applied every step.
+        """
+        attributes = self._wheel_rest_offsets.get(wheel_name)
+        if attributes is None:
+            print(f"[warn] wheel '{wheel_name}' has no sinkage setup; call install_wheel_sinkage "
+                  f"after loading the robot")
+            return
+
+        offset = self._nominal_wheel_rest_offsets[wheel_name] - max(0.0, float(depth_m))
+        for attribute in attributes:
+            attribute.Set(offset)
+
+    def reset_wheel_sinkage(self) -> None:
+        """Lift every wheel back to its nominal rest offset."""
+        for wheel_name in self._wheel_rest_offsets:
+            self.set_wheel_sinkage(wheel_name, 0.0)
+
+    def apply_wheel_resistance(self, coefficients: Dict[str, float], velocity_epsilon: float) -> None:
+        """
+        Push against each named wheel's horizontal motion with coefficient x its normal load.
+
+        This is the drag of a wheel ploughing through soft soil: rolling resistance proportional to
+        the load the wheel carries, acting at the hub against the direction it travels - forward,
+        backward or sideways alike, so a sunk wheel also resists being steered through the soil. A
+        wheel off the ground carries no load and feels nothing.
+
+        External forces last one physics step, so call this every step while a sinkage fault is
+        active, before the world steps. The normal load comes from the previous step's contact
+        forces. Below velocity_epsilon the force fades linearly to zero instead of flipping sign
+        every step, which is what an ideal Coulomb drag would do at a 33 ms step.
+        """
+        group = self.rigid_group
+        if group is None or not coefficients:
+            return
+
+        velocities, _ = group.get_velocities()
+        contacts = group.get_net_contact_forces()
+        forces = np.zeros((len(group.target_links), 3))
+        epsilon = max(1e-6, float(velocity_epsilon))
+
+        for i, link in enumerate(group.target_links):
+            coefficient = coefficients.get(link.replace("wheel_", "", 1), 0.0)
+            if coefficient <= 0.0:
+                continue
+            horizontal = np.array([velocities[i, 0], velocities[i, 1], 0.0])
+            speed = float(np.linalg.norm(horizontal))
+            normal_load = max(0.0, float(contacts[i, 2]))
+            if speed <= 0.0 or normal_load <= 0.0:
+                continue
+            # Full magnitude above epsilon, fading linearly to zero below it.
+            forces[i] = -coefficient * normal_load * horizontal / max(speed, epsilon)
+
+        group.apply_global_forces(forces)
+
+    def get_wheel_joint_efforts(self, wheel_names: List[str]) -> List[float]:
+        """
+        Measured drive joint torques in N*m, in the order given, as solved by PhysX.
+
+        Read from the tensor api's projected joint forces (Articulation.get_measured_joint_efforts):
+        the force the joint actually transmitted along its axis this step. dynamic_control's
+        STATE_EFFORT, used here before, reads about 1e-4 N*m and does not follow slope or
+        acceleration at all (correlation ~0 in the estimator calibration run, where the projected
+        force is 3-9 N*m and correlates with the load), so every motor_effort downlinked before this
+        change is meaningless. Falls back to STATE_EFFORT only if the view cannot be built.
+        Padded with 0.0 for a wheel that failed to resolve, so a fixed-length mdb array is never short.
+        """
+        view = self._joint_force_view()
+        if view is not None:
+            values = np.asarray(view.get_measured_joint_efforts()).reshape(-1)
+            return [float(values[self._force_dof_index[w]]) if w in self._force_dof_index else 0.0
+                    for w in wheel_names]
+
+        self._init_named_dofs()
+        efforts = []
+        for wheel_name in wheel_names:
+            dof = self._wheel_dofs.get(wheel_name)
+            if dof is None:
+                efforts.append(0.0)
+                continue
+            state = self.dc.get_dof_state(dof, _dynamic_control.STATE_EFFORT)
+            efforts.append(float(state.effort))
+        return efforts
+
+    def _joint_force_view(self):
+        """Tensor-api articulation view over the rover, built on first use; None if unavailable."""
+        if self._force_view is None and not self._force_view_failed:
+            try:
+                from isaacsim.core.prims import SingleArticulation
+
+                root = None
+                for prim in Usd.PrimRange(self.stage.GetPrimAtPath(self.robot_path)):
+                    if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                        root = str(prim.GetPath())
+                        break
+                view = SingleArticulation(prim_path=root or self.robot_path)
+                view.initialize()
+                self._force_dof_index = {
+                    name.replace("drive_joint_", ""): i for i, name in enumerate(view.dof_names)
+                    if name.startswith("drive_joint_")
+                }
+                self._force_view = view
+                print(f"[robot] joint force view on {root or self.robot_path}: "
+                      f"{len(self._force_dof_index)} drive dofs", flush=True)
+            except Exception as exc:
+                self._force_view_failed = True
+                print(f"[warn] joint force view unavailable, motor effort falls back to "
+                      f"dynamic_control (not a real torque): {exc}", flush=True)
+        return self._force_view
+
+    def get_wheel_joint_velocities(self, wheel_names: List[str]) -> List[float]:
+        """
+        Measured drive joint rates in rad/s, in the order given.
+
+        The unwrapped rate the onboard navigation filter needs at physics rate. The downlinked
+        motor_encoder is an angle wrapped to one revolution and sampled at 1 Hz, which aliases at
+        normal driving speeds. Padded with 0.0 for a wheel that failed to resolve, like the efforts.
+        """
+        self._init_named_dofs()
+
+        velocities = []
+        for wheel_name in wheel_names:
+            dof = self._wheel_dofs.get(wheel_name)
+            if dof is None:
+                velocities.append(0.0)
+                continue
+            state = self.dc.get_dof_state(dof, _dynamic_control.STATE_VEL)
+            velocities.append(float(state.vel))
+
+        return velocities
+
+    def _drive_wheel_names(self) -> List[str]:
+        return [
+            joint_name.replace("drive_joint_", "")
+            for side in ("left", "right")
+            for joint_name in self._wheel_joint_names.get(side, [])
+        ]
+
+    def _wheel_colliders(self, wheel_name: str) -> list:
+        """The collision prims of one wheel's link, found by traversal like _init_joint_prims."""
+        link = self.stage.GetPrimAtPath(os.path.join(self.robot_path, f"wheel_{wheel_name}"))
+        if not link:
+            return []
+        return [prim for prim in Usd.PrimRange(link) if prim.HasAPI(UsdPhysics.CollisionAPI)]
+
+    def clear_wheel_damping_factors(self) -> None:
+        """Release every seized wheel, restoring the damping the usd authored."""
+        for joint_name in list(self._nominal_wheel_damping):
+            self.set_wheel_damping_factor(joint_name.replace("drive_joint_", ""), 1.0)
+        self._wheel_damping_factors.clear()
+
+    # ── simulated sensor degradation ─────────────────────────────────────────────
+    # Applied inside the accessors, so every consumer sees the same broken sensor rather than only
+    # whatever happens to be downlinked. As with the joint limits, these are generic knobs: what a
+    # "severity" means, and which reference scales it, belongs to the mission's fault injector.
+
+    def set_fault_seed(self, seed: int) -> None:
+        """Reseed the sensor-noise streams so a faulted run replays identically."""
+        self._fault_rng = random.Random(seed)
+        self._fault_np_rng = np.random.default_rng(seed)
+
+    def set_imu_corruption(self, accel_bias=0.0, gyro_bias=0.0, orientation_bias_deg=0.0,
+                           accel_noise=0.0, gyro_noise=0.0) -> None:
+        """
+        Degrade the imu. Bias is a constant offset, noise a zero-mean gaussian per sample.
+
+        The bias is applied identically on every axis rather than as a random per-axis vector: it
+        makes the fault legible from the ground as a clean constant offset, which is what an
+        operator would actually be asked to spot.
+        """
+        self._imu_corruption = {
+            "accel_bias": float(accel_bias),
+            "gyro_bias": float(gyro_bias),
+            "orientation_bias_deg": float(orientation_bias_deg),
+            "accel_noise": float(accel_noise),
+            "gyro_noise": float(gyro_noise),
+        }
+
+    def set_camera_corruption(self, noise: float = 0.0) -> None:
+        """Sensor grain added to captured frames, as one sigma in counts of 255."""
+        self._camera_noise = float(noise)
+
+    def _corrupt_imu(self, linear_acceleration, angular_velocity, orientation):
+        """Apply the injected bias and noise in place. A no-op on a healthy imu."""
+        corruption = self._imu_corruption
+        if not any(corruption.values()):
+            return
+
+        for axis in linear_acceleration:
+            linear_acceleration[axis] += corruption["accel_bias"]
+            if corruption["accel_noise"]:
+                linear_acceleration[axis] += self._fault_rng.gauss(0.0, corruption["accel_noise"])
+
+        for axis in angular_velocity:
+            angular_velocity[axis] += corruption["gyro_bias"]
+            if corruption["gyro_noise"]:
+                angular_velocity[axis] += self._fault_rng.gauss(0.0, corruption["gyro_noise"])
+
+        # Degrees: the imu orientation is reported in degrees, and the mdb declares it that way.
+        # A yaw offset here is what makes the fault reach the power and thermal models, which use
+        # imu yaw for the sun angle.
+        for angle in orientation:
+            orientation[angle] += corruption["orientation_bias_deg"]
+
+
+    def _angular_drive(self, joint_name: str):
+        """The UsdPhysics angular DriveAPI of a named joint, or None with a warning."""
+        prim = self._joint_prims.get(joint_name)
+        if prim is None:
+            print(f"[warn] joint '{joint_name}' not found under {self.robot_path}")
+            return None
+
+        drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+        if not drive:
+            print(f"[warn] joint '{joint_name}' has no angular drive")
+            return None
+
+        return drive
+
+    def _init_joint_prims(self) -> None:
+        """
+        Resolve the robot's joint prims, keyed by joint name.
+
+        A joint prim is authored under its child body rather than at a path derivable from its own
+        name — drive_joint_mid_left sits under wheel_mid_left, steer_joint_front_left under
+        steer_front_left — so find them by traversing, the way edit_graphs does.
+        """
+        if self._joint_prims is not None:
+            return
+
+        self.stage = omni.usd.get_context().get_stage()
+        self._joint_prims = {
+            prim.GetName(): prim
+            for prim in Usd.PrimRange(self.stage.GetPrimAtPath(self.robot_path))
+            if prim.IsA(UsdPhysics.Joint)
+        }
 
     def _init_named_dofs(self) -> None:
         """
@@ -792,10 +1325,13 @@ class RobotRigidGroup:
         n_links = len(self.target_links)
         linear_velocities = np.zeros((n_links, 3))
         angular_velocities = np.zeros((n_links, 3))
-        for i, prim in enumerate(self.prims):
-            linear_velocity, angular_velocity = prim.get_velocities()
-            linear_velocities[i, :] = linear_velocity
-            angular_velocities[i, :] = angular_velocity
+        # Read through the RigidPrim views, like get_net_contact_forces. SingleRigidPrim has no
+        # get_velocities() in Isaac Sim 5.x (only get_linear_velocity / get_angular_velocity), and the
+        # view returns both halves in one (1, 6) read.
+        for i, prim_view in enumerate(self.prim_views):
+            velocities = np.asarray(prim_view.get_velocities()).reshape(-1)
+            linear_velocities[i, :] = velocities[:3]
+            angular_velocities[i, :] = velocities[3:6]
         return linear_velocities, angular_velocities
 
     def get_net_contact_forces(self) -> np.ndarray:
@@ -812,6 +1348,20 @@ class RobotRigidGroup:
             contact_force = prim_view.get_net_contact_forces(dt = self.dt).squeeze()
             contact_forces[i, :] = contact_force
         return contact_forces
+
+    def apply_global_forces(self, forces: np.ndarray) -> None:
+        """
+        Apply a world-frame force at the origin of each target link, for one physics step.
+
+        Rows of zeros are skipped. Unlike apply_force_torque, the frame is global: a resistance
+        against the direction of travel is naturally expressed in world coordinates.
+        """
+        assert forces.shape[0] == len(self.target_links), "given force does not have matching shape."
+        for i, prim_view in enumerate(self.prim_views):
+            if np.any(forces[i]):
+                prim_view.apply_forces_and_torques_at_pos(
+                    forces=np.asarray(forces[i], dtype=np.float32).reshape(1, 3), is_global=True,
+                )
 
     def apply_force_torque(self, forces: np.ndarray, torques: np.ndarray) -> None:
         """

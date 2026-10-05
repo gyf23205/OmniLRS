@@ -27,6 +27,7 @@ from yamcs.pymdb import (
     Command,
     DataSource,
     EnumeratedArgument,
+    EnumeratedDataType,
     EnumeratedParameter,
     FixedValueEntry,
     FloatArgument,
@@ -60,6 +61,14 @@ DEVICE_CHOICES = [
 POWER_CHOICES = [(0, "OFF", "Powered off"), (1, "ON", "Powered on")]
 SOLAR_PANEL_CHOICES = [(0, "STOWED", "Panel stowed"), (1, "DEPLOYED", "Panel deployed")]
 GO_NOGO_CHOICES = [(0, "NOGO", "Rover held"), (1, "GO", "Rover cleared to operate")]
+# Must stay in sync with src/subsystems/device.py HealthState. Listed worst-last for the ui; the
+# numbers are identifiers, not a ranking - DEGRADED was appended to the enum rather than inserted so
+# no already-archived value changed meaning.
+HEALTH_CHOICES = [
+    (0, "NOMINAL", "Working to spec"),
+    (2, "DEGRADED", "Still working, but not to spec"),
+    (1, "FAULT", "Failed"),
+]
 # Must stay in sync with control/drive_controller.py CommandStatus.
 COMMAND_STATUS_CHOICES = [
     (0, "IDLE", "No command active"),
@@ -75,13 +84,22 @@ OBC_STATE_CHOICES = [
 ]
 
 WHEELS = ["front_left", "front_right", "mid_left", "mid_right", "rear_left", "rear_right"]
+# The two mid wheels are not steerable; keep in sync with steer_joints in cfg/robot/perseverance.yaml.
+CORNERS = ["front_left", "front_right", "rear_left", "rear_right"]
+
+# Fault targets. ALL is last so adding a wheel would not renumber it.
+WHEEL_CHOICES = [(i, wheel.upper(), f"{wheel.replace('_', ' ')} wheel") for i, wheel in enumerate(WHEELS)]
+WHEEL_CHOICES.append((len(WHEELS), "ALL", "Every wheel"))
+CORNER_CHOICES = [(i, corner.upper(), f"{corner.replace('_', ' ')} corner") for i, corner in enumerate(CORNERS)]
+CORNER_CHOICES.append((len(CORNERS), "ALL", "Every steerable corner"))
+
 THERMAL_FACES = [
     ("front", "+X face"), ("back", "-X face"), ("left", "+Y face"),
     ("right", "-Y face"), ("top", "+Z face"), ("bottom", "-Z face"),
 ]
 
 
-def build_telemetry(rover: System) -> None:
+def build_telemetry(rover: System, faults: Subsystem) -> None:
     # ── pose and attitude ────────────────────────────────────────────────────
     AggregateParameter(
         system=rover, name="pose_ground_truth", data_source=LOCAL,
@@ -119,6 +137,20 @@ def build_telemetry(rover: System) -> None:
         system=rover, name="motor_encoder", data_source=LOCAL, length=6,
         data_type=IntegerDataType(signed=False, bits=16),
         short_description="Drive joint angles, 1024 counts per revolution",
+    )
+    # Measured by the physics solver, not computed from the command. Encoder against pose shows a
+    # wheel slipping; effort says why - near zero on ice, high in soft soil.
+    ArrayParameter(
+        system=rover, name="motor_effort", data_source=LOCAL, length=6,
+        data_type=FloatDataType(units="N*m"),
+        short_description="Measured drive joint torque per wheel: front, mid, rear; left then right",
+    )
+    # Measured, not commanded. This is what makes a stuck or weakened steer actuator visible from
+    # the ground: compare it against the arc the rover was asked to drive.
+    ArrayParameter(
+        system=rover, name="steer_encoder", data_source=LOCAL, length=4,
+        data_type=FloatDataType(units="deg"),
+        short_description="Measured steer angle of the four corner joints",
     )
     for wheel in WHEELS:
         FloatParameter(
@@ -217,6 +249,170 @@ def build_telemetry(rover: System) -> None:
         members=[FloatMember(name="x", units="m"), FloatMember(name="y", units="m")],
     )
 
+    # ── injected faults ──────────────────────────────────────────────────────
+    # Everything artificial lives under /Rover/faults, so no injected value can be read as a real
+    # rover measurement. Note steer_encoder above deliberately stays on the plain /Rover path: it is
+    # a genuine reading off the joint, and filing it here would misrepresent it.
+    StringParameter(
+        system=faults, name="active", data_source=LOCAL, initial_value="none",
+        short_description="Summary of every fault currently injected, or 'none'",
+    )
+    ArrayParameter(
+        system=faults, name="wheel_torque_limit", data_source=LOCAL, length=6,
+        data_type=FloatDataType(units="N*m"),
+        short_description="Per-wheel drive torque limit; a healthy wheel reads the configured nominal",
+    )
+    ArrayParameter(
+        system=faults, name="wheel_damping_factor", data_source=LOCAL, length=6,
+        data_type=FloatDataType(),
+        short_description="Per-wheel drive damping multiplier from a stuck-wheel fault; a healthy wheel reads 1.0",
+    )
+    ArrayParameter(
+        system=faults, name="wheel_friction", data_source=LOCAL, length=6,
+        data_type=FloatDataType(),
+        short_description="Per-wheel ground friction coefficient; a slip fault lowers it from the configured nominal",
+    )
+    ArrayParameter(
+        system=faults, name="wheel_sinkage", data_source=LOCAL, length=6,
+        data_type=FloatDataType(units="m"),
+        short_description="Per-wheel depth a sink fault has settled the wheel into the ground; 0 when healthy",
+    )
+    ArrayParameter(
+        system=faults, name="steer_torque_limit", data_source=LOCAL, length=4,
+        data_type=FloatDataType(units="N*m"),
+        short_description="Per-corner steer torque limit; a healthy corner reads the configured nominal",
+    )
+    # Ground truth, not a diagnosis. The injector knows precisely what it broke, so the health it
+    # reports is exact - which is the whole reason these can name the individual actuator rather
+    # than just flagging the subsystem.
+    ArrayParameter(
+        system=faults, name="wheel_health", data_source=LOCAL, length=6,
+        data_type=EnumeratedDataType(choices=HEALTH_CHOICES, encoding=uint8_t),
+        short_description="Ground-truth health of each drive actuator",
+    )
+    ArrayParameter(
+        system=faults, name="steer_health", data_source=LOCAL, length=4,
+        data_type=EnumeratedDataType(choices=HEALTH_CHOICES, encoding=uint8_t),
+        short_description="Ground-truth health of each steer actuator; a stuck corner reads FAULT",
+    )
+    EnumeratedParameter(
+        system=faults, name="motor_controller_health", data_source=LOCAL, choices=HEALTH_CHOICES,
+        short_description="Coarse mobility health; DEGRADED whenever any actuator fault is injected",
+    )
+    for name, description in [
+        ("imu_health", "Inertial measurement unit"),
+        ("camera_health", "Camera"),
+        ("battery_health", "Battery / power system"),
+        ("comms_health", "Ground link"),
+    ]:
+        EnumeratedParameter(
+            system=faults, name=name, data_source=LOCAL, choices=HEALTH_CHOICES,
+            short_description=f"{description} health, from ground truth",
+        )
+    FloatParameter(
+        system=faults, name="parasitic_load", data_source=LOCAL, units="W", minimum=0.0,
+        short_description="Injected extra load on the battery; the battery fault's observable",
+    )
+    # Cumulative for the run and never reset by clear_faults: a counter that only rises is the one
+    # an operator can plot without wondering where the steps came from.
+    AggregateParameter(
+        system=faults, name="dropped", data_source=LOCAL,
+        short_description="Cumulative losses caused by injected faults",
+        members=[
+            FloatMember(name="tm", short_description="Telemetry parameters lost on the downlink"),
+            FloatMember(name="tc", short_description="Telecommands lost on the uplink"),
+            FloatMember(name="camera_frames", short_description="Camera frames never sent"),
+        ],
+    )
+
+
+def build_estimator(estimator: Subsystem) -> None:
+    """
+    Onboard navigation filter output (src/mission_specific/perseverance/estimation/nav_filter.py).
+
+    Computed on the rover from its own sensors only, so it is observable telemetry. Residuals are
+    normalized (units of sigma, nominally N(0, 1)) and summarized over each 1 s window: "mean" for
+    the persistent part a fault leaves behind, "max" (signed extreme) for transients. Wheel arrays
+    are in ALL_WHEELS order: front_left, front_right, mid_left, mid_right, rear_left, rear_right.
+    """
+    AggregateParameter(
+        system=estimator, name="pose", data_source=LOCAL,
+        short_description="Estimated pose, episode-local position and world heading of the forward axis",
+        members=[FloatMember(name="x", units="m"), FloatMember(name="y", units="m"), FloatMember(name="yaw", units="deg")],
+    )
+    AggregateParameter(
+        system=estimator, name="motion", data_source=LOCAL,
+        short_description="Estimated forward speed, sideways sliding speed and yaw rate",
+        members=[
+            FloatMember(name="speed", units="m/s"),
+            FloatMember(name="lateral_speed", units="m/s"),
+            FloatMember(name="yaw_rate", units="rad/s"),
+        ],
+    )
+    AggregateParameter(
+        system=estimator, name="bias", data_source=LOCAL,
+        short_description="Estimated IMU biases",
+        members=[FloatMember(name="gyro", units="rad/s"), FloatMember(name="accel", units="m/s^2")],
+    )
+    AggregateParameter(
+        system=estimator, name="imu_residual", data_source=LOCAL,
+        short_description="Normalized gyro and heading innovations, and unexplained lateral force (sigma)",
+        members=[FloatMember(name=f"{kind}_{field}") for kind in ("gyro", "heading", "lateral_force")
+                 for field in ("mean", "max")],
+    )
+    AggregateParameter(
+        system=estimator, name="nis", data_source=LOCAL,
+        short_description="Mean normalized innovation squared over the window (nominally 1)",
+        members=[FloatMember(name=name) for name in ("wheels", "gyro", "heading")],
+    )
+    for name, description in [
+        ("wheel_rolling", "Wheel speed innovation against the EKF prediction"),
+        ("wheel_sideslip", "Wheel sliding along its axle (no-side-slip innovation)"),
+        ("wheel_effort", "Drive torque in excess of the torque model, in the direction of motion"),
+        ("wheel_tracking", "Commanded wheel rate the wheel failed to reach"),
+    ]:
+        for field in ("mean", "max"):
+            ArrayParameter(
+                system=estimator, name=f"{name}_{field}", data_source=LOCAL, length=6,
+                data_type=FloatDataType(),
+                short_description=f"{description}, window {field}, sigma",
+            )
+    IntegerParameter(
+        system=estimator, name="cusum_alarm", signed=False, bits=32, data_source=LOCAL,
+        short_description="Persistent-shift alarms, one bit per residual in nav_filter.RESIDUAL_KEYS order",
+    )
+    IntegerParameter(
+        system=estimator, name="reacquisitions", signed=False, bits=16, data_source=LOCAL,
+        short_description="Times the gyro or heading channel was re-accepted after being rejected for reacquire_s (episode total)",
+    )
+
+
+def build_camera_metadata(camera: Subsystem) -> None:
+    """
+    Declares what ImagesHandler._inform_yamcs publishes for each downlinked frame.
+
+    The image itself lives in a Yamcs bucket; these parameters are how the ground finds it. Real
+    telemetry, not fault bookkeeping, so it sits on /Rover/camera rather than /Rover/faults.
+    """
+    images = Subsystem(camera, "images_navcam")
+    IntegerParameter(
+        system=images, name="number", signed=False, bits=32, data_source=LOCAL,
+        short_description="Sequence number of the latest nav-cam frame",
+    )
+    StringParameter(
+        system=images, name="name", data_source=LOCAL, initial_value="none",
+        short_description="File name of the latest nav-cam frame",
+    )
+    for name, description in [
+        ("url_storage", "Bucket-relative path of the latest frame"),
+        ("url_full", "Absolute Yamcs URL of the latest frame"),
+        ("url_full_nginx", "Reverse-proxy URL of the latest frame"),
+    ]:
+        StringParameter(
+            system=images, name=name, data_source=LOCAL, initial_value="none",
+            short_description=description,
+        )
+
 
 def add_command(system: System, name: str, description: str, arguments=None) -> None:
     """
@@ -242,7 +438,7 @@ def add_command(system: System, name: str, description: str, arguments=None) -> 
     )
 
 
-def build_commands(motor: Subsystem, rover_system: Subsystem) -> None:
+def build_commands(motor: Subsystem, rover_system: Subsystem, faults: Subsystem) -> None:
     # Argument names and order match DriveHandler.drive_robot_straight / drive_robot_turn, so the
     # motion controller can delegate to them unchanged once it exists.
     add_command(
@@ -283,11 +479,88 @@ def build_commands(motor: Subsystem, rover_system: Subsystem) -> None:
         arguments=[EnumeratedArgument(name="decision", choices=GO_NOGO_CHOICES, encoding=uint8_t)],
     )
 
+    # Fault injection. Not flight commands — these reach into the simulation and break things on
+    # purpose, which is why they sit in their own subsystem rather than beside the drive commands.
+    # Severity runs healthy (0.0) to dead (1.0), so a larger number is always a worse fault, and
+    # 0.0 is how a fault is lifted.
+    add_command(
+        faults, "inject_wheel_torque_fault", "[SIM] Weaken a drive motor by limiting its torque",
+        arguments=[
+            EnumeratedArgument(name="wheel", choices=WHEEL_CHOICES, encoding=uint8_t),
+            FloatArgument(name="severity", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_wheel_stuck_fault", "[SIM] Seize a wheel by raising its joint damping",
+        arguments=[
+            EnumeratedArgument(name="wheel", choices=WHEEL_CHOICES, encoding=uint8_t),
+            FloatArgument(name="severity", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_wheel_slip_fault", "[SIM] Take a wheel's grip away by lowering its ground friction",
+        arguments=[
+            EnumeratedArgument(name="wheel", choices=WHEEL_CHOICES, encoding=uint8_t),
+            FloatArgument(name="severity", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_wheel_sink_fault", "[SIM] Sink a wheel into very soft ground",
+        arguments=[
+            EnumeratedArgument(name="wheel", choices=WHEEL_CHOICES, encoding=uint8_t),
+            FloatArgument(name="severity", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_steer_torque_fault", "[SIM] Weaken a steer actuator by limiting its torque",
+        arguments=[
+            EnumeratedArgument(name="corner", choices=CORNER_CHOICES, encoding=uint8_t),
+            FloatArgument(name="severity", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_steer_stuck_fault", "[SIM] Freeze a corner at a fixed steer angle",
+        arguments=[
+            EnumeratedArgument(name="corner", choices=CORNER_CHOICES, encoding=uint8_t),
+            FloatArgument(name="angle", encoding=float32_t, units="deg"),
+        ],
+    )
+    add_command(
+        faults, "inject_imu_fault", "[SIM] Bias and/or roughen the inertial measurement unit",
+        arguments=[
+            FloatArgument(name="bias", encoding=float32_t, minimum=0.0, maximum=1.0),
+            FloatArgument(name="noise", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_camera_fault", "[SIM] Lose and/or corrupt camera frames",
+        arguments=[
+            FloatArgument(name="loss", encoding=float32_t, minimum=0.0, maximum=1.0),
+            FloatArgument(name="noise", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(
+        faults, "inject_battery_fault", "[SIM] Drain the battery with a parasitic load",
+        arguments=[FloatArgument(name="severity", encoding=float32_t, minimum=0.0, maximum=1.0)],
+    )
+    # clear_faults is never dropped however high tc_loss goes - see FaultInjector.should_drop_tc.
+    add_command(
+        faults, "inject_comms_fault", "[SIM] Lose telemetry and/or telecommands",
+        arguments=[
+            FloatArgument(name="tm_loss", encoding=float32_t, minimum=0.0, maximum=1.0),
+            FloatArgument(name="tc_loss", encoding=float32_t, minimum=0.0, maximum=1.0),
+        ],
+    )
+    add_command(faults, "clear_faults", "[SIM] Restore every subsystem to nominal")
+
 
 def main() -> None:
     rover = System("Rover")
-    build_telemetry(rover)
-    build_commands(Subsystem(rover, "motor"), Subsystem(rover, "system"))
+    faults = Subsystem(rover, "faults")
+    build_telemetry(rover, faults)
+    build_camera_metadata(Subsystem(rover, "camera"))
+    build_estimator(Subsystem(rover, "estimator"))
+    build_commands(Subsystem(rover, "motor"), Subsystem(rover, "system"), faults)
 
     output = os.path.abspath(OUTPUT)
     with open(output, "wt") as handle:
