@@ -167,6 +167,11 @@ class PowerModel(RobotPhysicsModel):
         else:
             return hi
 
+    def set_state_of_charge(self, fraction: float) -> None:
+        """Set the stored charge as a fraction of capacity (0 empty, 1 full), voltage included."""
+        self._battery_charge_wh = _clamp(float(fraction), 0.0, 1.0) * self._battery_capacity_wh
+        self._update_battery_voltage()
+
     def set_parasitic_load(self, watts: float) -> None:
         """
         An unmodelled load drawing straight off the battery - a short, a stuck heater.

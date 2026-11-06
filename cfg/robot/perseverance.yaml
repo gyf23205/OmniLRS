@@ -29,6 +29,39 @@ robots_settings:
     wheel_joints:
       left: ["drive_joint_front_left", "drive_joint_mid_left", "drive_joint_rear_left"]
       right: ["drive_joint_front_right", "drive_joint_mid_right", "drive_joint_rear_right"]
+    # Physics overrides, applied to the usd before PhysX parses the rover (Robot.install_physics_overrides).
+    physics:
+      # A still articulation otherwise goes to sleep, and then reports no wheel contact and a frozen IMU.
+      articulation_sleep_threshold: 0.0
+      articulation_stabilization_threshold: 0.0
+      # Downlink each wheel's mean contact force over the interval, not one physics step's reading.
+      contact_force_window: true
+      # motor_encoder carries each wheel's measured speed averaged over the interval, in place of
+      # the drive joint angle, which aliased at driving speed when sampled at 1 Hz.
+      wheel_speed_window: true
+      # The usd gives each wheel 100 kg, 59% of the rover's 1025 kg. 25 kg per wheel, the difference
+      # moved into the body: the total stays 1025 kg. Not lighter: with 5 kg wheels the wheel speed
+      # jittered 3-4x more under the 30 Hz physics step and the unchanged drive gains (tested
+      # 2026-10-11), which blew up the EKF's wheel and tracking residuals.
+      link_masses:
+        wheel_front_left: 25.0
+        wheel_front_right: 25.0
+        wheel_mid_left: 25.0
+        wheel_mid_right: 25.0
+        wheel_rear_left: 25.0
+        wheel_rear_right: 25.0
+        body: 840.0
+      # The usd springs the rocker and bogie pivots back to 0 deg (drive stiffness 4000 and 200), which
+      # leaves the chassis nearly rigid: at rest it stood on three wheels. Free pivots, damping kept,
+      # limits in degrees.
+      free_joints:
+        suspension_joint_rocker_left: [-30.0, 30.0]
+        suspension_joint_rocker_right: [-30.0, 30.0]
+        suspension_joint_bogie_left: [-40.0, 40.0]
+        suspension_joint_bogie_right: [-40.0, 40.0]
+      # The differential: the two rockers turn equal and opposite, and the body pitches by their mean.
+      mimic_joints:
+        suspension_joint_rocker_right: {reference: suspension_joint_rocker_left, gearing: 1.0}
     # Four steerable corners (the two mid wheels are fixed) - the real rocker-bogie layout.
     # These are position drives in the usd (stiffness 500, damping 200), so they hold an angle.
     # Their presence is what switches the rover from skid steering to Ackermann.
@@ -111,56 +144,62 @@ robots_settings:
       max_parasitic_load_w: 40.0         # W drawn straight off a 60 Wh pack: visible within minutes
     # Onboard navigation EKF (src/mission_specific/perseverance/estimation/). Estimates the rover's
     # motion from its own sensors and downlinks per-sensor residuals under /Rover/estimator.
-    # FITTED by scripts/fit_nav_estimator.py on 4 nominal 600 s episodes (2026-09-30, dataset seed 21).
-    # Replay NIS: wheels 1.23, gyro 1.03, heading 0.87. CUSUM thresholds: 1.5x the nominal peak per residual. Refit after changing the rover, terrain or physics:
+    # FITTED by scripts/fit_nav_estimator.py on 14 nominal 600 s episodes (2026-10-11, dataset seed
+    # 300, my_files/nav_refit), after the physics change (free rocker-bogie, 25 kg wheels, sleep off).
+    # Replay NIS: wheels 1.06, gyro 1.02, heading 0.81. CUSUM thresholds: 1.5x the nominal peak per
+    # residual. Refit after changing the rover, terrain or physics:
     #   run_perseverance.py --headless --dataset-out DIR --estimator-dump DIR (nominal episodes only)
     #   python3 scripts/fit_nav_estimator.py DUMP_DIR --out fit.yaml
-    # imu.forward/left: the rover's axes in the imu frame. wheel_yaw_scale: wheels see 1.034x the true
+    # imu.forward/left: the rover's axes in the imu frame. wheel_yaw_scale: wheels see 1.054x the true
     # yaw rate (scrub). torque_model: least squares on the measured joint force; per-sample R^2 is only
-    # 0.1-0.2, the residual is used through 1 s windows and the CUSUM.
+    # 0.12-0.30, the residual is used through 1 s windows and the CUSUM. The rear wheels lag their
+    # command by a steady +0.6 sigma on nominal driving, so wheel_tracking.rear_* thresholds are ~200.
     estimator:
       enabled: true
       imu:
         forward: [-0.0, -1.0, -0.0]
         left: [1.0, 0.0, 0.0]
-      process_noise: {sigma_accel: 0.404445, q_omega: 0.00239, q_heading: 1.36e-05, q_gyro_bias: 1.0e-06, q_accel_bias: 1.0e-05}
-      measurement_noise: {sigma_wheel: 0.015579, sigma_sideslip: 0.00473, sigma_gyro: 0.008437, sigma_heading: 0.000658,
-        sigma_yaw_scale: 0.2}
+      process_noise: {sigma_accel: 0.278752, q_omega: 0.00278, q_heading: 6.93e-06, q_gyro_bias: 1.0e-06,
+        q_accel_bias: 1.0e-05, q_odometry: 0.00299}
+      measurement_noise: {sigma_wheel: 0.021986, sigma_sideslip: 0.006614, sigma_gyro: 0.011699,
+        sigma_heading: 0.000825, sigma_yaw_scale: 0.2}
       gate: 10.828
       max_gated_wheels: 2
       reacquire_s: 3.0
       window_s: 1.0
-      tracking_sigma: 0.158182
+      tracking_sigma: 0.209852
       cusum:
         drift: 0.5
         threshold: 10.0
-        window_sigma: {wheel_rolling.front_left: 0.562869, wheel_rolling.front_right: 0.552888, wheel_rolling.mid_left: 0.500004,
-          wheel_rolling.mid_right: 0.487621, wheel_rolling.rear_left: 0.573974, wheel_rolling.rear_right: 0.562194,
-          wheel_sideslip.front_left: 0.757014, wheel_sideslip.front_right: 0.815016, wheel_sideslip.mid_left: 0.460652,
-          wheel_sideslip.mid_right: 0.460652, wheel_sideslip.rear_left: 0.8007, wheel_sideslip.rear_right: 0.774197,
-          wheel_effort.front_left: 0.438347, wheel_effort.front_right: 0.426499, wheel_effort.mid_left: 0.472861, wheel_effort.mid_right: 0.476027,
-          wheel_effort.rear_left: 0.378844, wheel_effort.rear_right: 0.349822, wheel_tracking.front_left: 0.215211,
-          wheel_tracking.front_right: 0.208197, wheel_tracking.mid_left: 0.190622, wheel_tracking.mid_right: 0.18258,
-          wheel_tracking.rear_left: 0.234623, wheel_tracking.rear_right: 0.2366, gyro: 0.583591, heading: 0.846732,
-          lateral_force: 0.069002}
-        thresholds: {wheel_rolling.front_left: 21.85, wheel_rolling.front_right: 20.96, wheel_rolling.mid_left: 21.26,
-          wheel_rolling.mid_right: 19.67, wheel_rolling.rear_left: 22.79, wheel_rolling.rear_right: 20.43, wheel_sideslip.front_left: 22.01,
-          wheel_sideslip.front_right: 18.64, wheel_sideslip.mid_left: 20.33, wheel_sideslip.mid_right: 20.33, wheel_sideslip.rear_left: 20.02,
-          wheel_sideslip.rear_right: 27.26, wheel_effort.front_left: 25.02, wheel_effort.front_right: 26.16, wheel_effort.mid_left: 49.74,
-          wheel_effort.mid_right: 21.35, wheel_effort.rear_left: 27.96, wheel_effort.rear_right: 22.8, wheel_tracking.front_left: 14.35,
-          wheel_tracking.front_right: 21.91, wheel_tracking.mid_left: 19.02, wheel_tracking.mid_right: 13.58, wheel_tracking.rear_left: 23.28,
-          wheel_tracking.rear_right: 20.72, gyro: 25.33, heading: 31.48, lateral_force: 19.42}
+        window_sigma: {wheel_rolling.front_left: 0.490054, wheel_rolling.front_right: 0.474572,
+          wheel_rolling.mid_left: 0.456765, wheel_rolling.mid_right: 0.437011, wheel_rolling.rear_left: 0.513933,
+          wheel_rolling.rear_right: 0.495306, wheel_sideslip.front_left: 0.885067, wheel_sideslip.front_right: 0.91025,
+          wheel_sideslip.mid_left: 0.286755, wheel_sideslip.mid_right: 0.286755, wheel_sideslip.rear_left: 0.88942,
+          wheel_sideslip.rear_right: 0.879966, wheel_effort.front_left: 0.407199, wheel_effort.front_right: 0.404295,
+          wheel_effort.mid_left: 0.3904, wheel_effort.mid_right: 0.395453, wheel_effort.rear_left: 0.303177,
+          wheel_effort.rear_right: 0.304583, wheel_tracking.front_left: 0.24241, wheel_tracking.front_right: 0.245481,
+          wheel_tracking.mid_left: 0.199013, wheel_tracking.mid_right: 0.193689, wheel_tracking.rear_left: 0.275766,
+          wheel_tracking.rear_right: 0.257608, gyro: 0.480784, heading: 0.77707, lateral_force: 0.074599}
+        thresholds: {wheel_rolling.front_left: 29.9, wheel_rolling.front_right: 31.31,
+          wheel_rolling.mid_left: 28.9, wheel_rolling.mid_right: 30.48, wheel_rolling.rear_left: 28.32,
+          wheel_rolling.rear_right: 29.66, wheel_sideslip.front_left: 26.17, wheel_sideslip.front_right: 29.54,
+          wheel_sideslip.mid_left: 43.99, wheel_sideslip.mid_right: 43.99, wheel_sideslip.rear_left: 39.7,
+          wheel_sideslip.rear_right: 48.5, wheel_effort.front_left: 36.86, wheel_effort.front_right: 35.57,
+          wheel_effort.mid_left: 44.13, wheel_effort.mid_right: 41.11, wheel_effort.rear_left: 23.82,
+          wheel_effort.rear_right: 22.74, wheel_tracking.front_left: 27.73, wheel_tracking.front_right: 49.77,
+          wheel_tracking.mid_left: 17.92, wheel_tracking.mid_right: 16.82, wheel_tracking.rear_left: 226.59,
+          wheel_tracking.rear_right: 194.36, gyro: 43.42, heading: 38.0, lateral_force: 39.94}
       torque_model:
         coefficients:
-          front_left: [7.567276, 3.053446, -0.801173, 0.867276, 0.041451]
-          front_right: [7.025763, 3.263217, -0.892124, 0.911345, -0.835747]
-          mid_left: [3.205047, 1.988643, -0.109455, 0.820224, -1.172803]
-          mid_right: [2.852301, 1.765752, -0.029635, 0.71681, 2.000402]
-          rear_left: [15.438522, -0.163871, 2.220984, 0.574549, -0.047326]
-          rear_right: [15.435839, -0.800887, 2.450034, 0.637957, -1.954762]
-        sigma: {front_left: 9.393487, front_right: 9.007143, mid_left: 6.98543, mid_right: 6.761839, rear_left: 15.153433,
-          rear_right: 15.516558}
-      wheel_yaw_scale: 1.03394
+          front_left: [9.437029, 4.964284, -1.420362, 0.551823, -3.96822]
+          front_right: [9.651406, 5.432974, -1.562787, 0.490764, -1.740508]
+          mid_left: [3.233078, 2.201386, -0.119874, 0.346741, -1.602938]
+          mid_right: [3.06983, 1.926346, -0.077619, 0.361183, -1.624353]
+          rear_left: [19.235378, 1.949363, 2.013035, 0.167435, 4.77219]
+          rear_right: [17.971958, 1.937641, 1.913916, 0.174077, 2.516918]
+        sigma: {front_left: 6.907156, front_right: 6.898207, mid_left: 5.091666, mid_right: 4.792364,
+          rear_left: 11.744434, rear_right: 11.480014}
+      wheel_yaw_scale: 1.05409
     # Fault-detection dataset generation (--dataset-out). Everything here only shapes the sampling;
     # the faults themselves go through the same inject_* methods a ground-control command reaches,
     # so a dataset fault and an operator's fault are the same fault. See
@@ -184,6 +223,15 @@ robots_settings:
                                   # from 3 m, which could flip the rover on landing
         spawn_jitter_m: 3.0       # how far an episode's start wanders from the pose above
         rocks_per_episode: 8
+        # Initial state, sampled per episode so no channel counts time from a fixed start. See the
+        # initial-state block of DEFAULTS in dataset/episode_runner.py; meta.json records the draws.
+        preroll_s: [0.0, 60.0]            # driven before t=0, not recorded
+        battery_soc_range: [0.5, 1.0]     # state of charge at the start
+        thermal_history_s: 1800.0         # faces warmed by this much driving at random headings,
+        thermal_heading_hold_s: [10.0, 60.0]  # each held this long; the last is the current heading
+        obc_uptime_range_s: [1800.0, 259200.0]  # 30 min to 3 days since boot
+        estimator_origin_m: 50.0          # radius of the filter's starting position in its frame
+        estimator_reacquisition_rate_hz: 0.0067  # counts accumulated since boot, Poisson
       faults:
         # Episode mix. Majority nominal because a detector needs negatives, and overlap kept rare
         # because simultaneous faults are the unusual case - about 9% of episodes at these weights.
@@ -205,13 +253,14 @@ robots_settings:
           camera: 1.0
           battery: 1.0
           comms: 1.0
-        # Fractions of the episode. Onsets sit in the middle so every faulted episode holds a clean
-        # baseline, the transition, and the settled faulted regime - a fault starting at t=0 would
-        # teach a classifier to recognise a regime rather than to detect anything.
-        onset_window: [0.40, 0.60]
+        # Onsets are uniform in [onset_min_s, onset_max * episode]: every faulted episode keeps a
+        # clean lead-in and some faulted regime - a fault starting at t=0 would teach a classifier
+        # to recognise a regime rather than to detect anything.
+        onset_min_s: 10.0
+        onset_max: 0.90
         # Severities start well above zero: a fault too weak to have an effect is a mislabelled
         # nominal episode, which is worse than no episode at all.
-        severity_range: [0.30, 1.00]
+        severity_range: [0.50, 1.00]
         steer_stuck_angle_deg: [10.0, 45.0]
         recovery_probability: 0.25
         all_targets_probability: 0.15

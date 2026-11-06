@@ -73,6 +73,11 @@ class ProcessNoise:
     q_gyro_bias: float = 1e-6        # (rad/s)^2 per s
     q_accel_bias: float = 1e-5       # (m/s^2)^2 per s
     q_position: float = 1e-6         # m^2 per s, keeps P well conditioned while parked
+    # m^2 per m driven, per axis. Wheel odometry errs slowly (terrain under each wheel, scrub, sinkage),
+    # so the errors do not average out the way the white wheel noise assumes, and the position drifts
+    # like a random walk in distance. No measurement depends on position, so this widens only the
+    # position uncertainty: gains, residuals and alarms are unchanged.
+    q_odometry: float = 0.0
     q_heading: float = 3e-5          # rad^2 per s, unmodelled heading kinematics on rough terrain
 
 
@@ -118,10 +123,10 @@ def propagate(x: np.ndarray, imu: ImuInput, dt: float, gravity: float) -> Tuple[
     return x_next, F
 
 
-def process_noise(noise: ProcessNoise, dt: float) -> np.ndarray:
-    """Discrete Q for one step of length dt."""
+def process_noise(noise: ProcessNoise, dt: float, distance: float = 0.0) -> np.ndarray:
+    """Discrete Q for one step of length dt, over which the rover drove `distance` metres."""
     q = np.zeros(STATE_DIM)
-    q[PX] = q[PY] = noise.q_position * dt
+    q[PX] = q[PY] = noise.q_position * dt + noise.q_odometry * distance
     q[PSI] = noise.q_heading * dt
     q[V] = q[VLAT] = (noise.sigma_accel * dt) ** 2
     q[OMEGA] = noise.q_omega * dt

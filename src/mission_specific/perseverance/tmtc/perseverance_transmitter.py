@@ -35,6 +35,8 @@ class PerseveranceTransmitter:
         "mid_left", "mid_right",
         "rear_left", "rear_right",
     )
+    # Order matches the steer_joints list in cfg/robot/perseverance.yaml, i.e. steer_encoder's order.
+    STEER_NAMES = ("front_left", "front_right", "rear_left", "rear_right")
 
     def __init__(
         self,
@@ -47,7 +49,13 @@ class PerseveranceTransmitter:
         drive_controller=None,
         fault_injector=None,
         nav_filter=None,
+        advance_power_model=False,
     ):
+        """
+        advance_power_model: True only when nothing else advances the power model, so that each
+        downlink of the power telemetry also advances it by the downlink interval. Every launch
+        script that steps the model at the physics rate leaves it False, and the downlink only reads.
+        """
         self._transmit = transmit_func
         self._robot: Robot = robot
         self._robot_RG = robot_RG
@@ -57,6 +65,7 @@ class PerseveranceTransmitter:
         self._drive = drive_controller
         self._faults = fault_injector
         self._nav = nav_filter
+        self._advance_power_model = bool(advance_power_model)
         self._active_command = "none"
 
     # ── command echo and execution progress ──────────────────────────────────────
@@ -135,11 +144,6 @@ class PerseveranceTransmitter:
         }
         self._transmit(self._parameters_conf["pose_of_base_link"], pose_of_base_link)
 
-    def transmit_wheels_joint_angles(self):
-        angles = self._robot.get_wheels_joint_angles()
-        self._transform_joint_angles(angles)
-        self._transmit(self._parameters_conf["motor_encoder"], angles)
-
     def transmit_motor_effort(self):
         """
         Downlink the measured torque on each drive joint, in WHEEL_NAMES order.
@@ -151,6 +155,17 @@ class PerseveranceTransmitter:
         efforts = self._robot.get_wheel_joint_efforts(list(self.WHEEL_NAMES))
         self._transmit(self._parameters_conf["motor_effort"], efforts)
 
+    def transmit_motor_encoder(self):
+        """
+        Downlink each drive wheel's measured rate in rad/s, in WHEEL_NAMES order. With the robot's
+        wheel speed window on (physics.wheel_speed_window) it is the mean over the downlink interval,
+        in the same joint frame as wheel_speed_setpoint. motor_encoder used to carry the drive joint
+        angle instead: wrapped to one revolution and sampled once a second, that angle aliased at
+        driving speed.
+        """
+        read = getattr(self._robot, "get_mean_wheel_joint_velocities", self._robot.get_wheel_joint_velocities)
+        self._transmit(self._parameters_conf["motor_encoder"], [float(v) for v in read(list(self.WHEEL_NAMES))])
+
     def transmit_steer_encoder(self):
         """
         Downlink the measured corner steer angles in degrees.
@@ -161,14 +176,37 @@ class PerseveranceTransmitter:
         angles = self._robot.get_steer_angles()
         self._transmit(self._parameters_conf["steer_encoder"], [math.degrees(a) for a in angles])
 
-    def _transform_joint_angles(self, angles):
-        """Wrap to one revolution and scale to the 10-bit encoder counts the MDB declares."""
-        for i in range(len(angles)):
-            modulo = angles[i] % (2 * math.pi)
-            angles[i] = int(modulo * (1024.0 / (2 * math.pi)))
+    def transmit_joint_setpoints(self):
+        """
+        Downlink the joint setpoints the drive controller drove with, averaged over the interval
+        since the previous downlink.
+
+        These are the rover's actuation commands, the counterpart of motor_encoder and steer_encoder:
+        the gap between the two is what a faulted joint looks like. Averaged rather than sampled
+        because the controller updates them every physics step, and a single sample at a 1 Hz tick
+        misses a command that starts or ends between ticks. The value sent at tick t covers (t-1, t].
+        Steer angles are in degrees, like steer_encoder.
+        """
+        if self._drive is None:
+            return
+        steer, wheels = self._drive.setpoint_window()
+        self._transmit(
+            self._parameters_conf["wheel_speed_setpoint"],
+            [float(wheels.get(name, 0.0)) for name in self.WHEEL_NAMES],
+        )
+        self._transmit(
+            self._parameters_conf["steer_angle_setpoint"],
+            [math.degrees(steer.get(name, 0.0)) for name in self.STEER_NAMES],
+        )
 
     def transmit_contact_forces(self):
-        forces = self._robot_RG.get_net_contact_forces()
+        """
+        Downlink each wheel's contact force magnitude in N. With the robot's contact window on
+        (physics.contact_force_window), this is the mean force over the downlink interval: the
+        single-step reading switches on and off as a wheel's contact does, its mean does not.
+        """
+        read = getattr(self._robot_RG, "get_mean_net_contact_forces", self._robot_RG.get_net_contact_forces)
+        forces = read()
         magnitudes = np.linalg.norm(forces, axis=1)
         for name, magnitude in zip(self.WHEEL_NAMES, magnitudes):
             self._transmit(self._parameters_conf[f"contact_force_{name}"], float(magnitude))
@@ -204,15 +242,17 @@ class PerseveranceTransmitter:
 
     # ── subsystems ───────────────────────────────────────────────────────────────
     def transmit_power_info(self, interval_s):
-        robot_position, _ = self._robot_RG.get_pose_of_base_link()
-        _, _, imu_orientation = self._robot.get_imu_readings()
-        obc_state = self._robot.subsystems.get_obc_state()
-        power_status = self._robot.subsystems.get_power_status(
-            robot_position,
-            imu_orientation["yaw"],
-            interval_s,
-            obc_state,
-        )
+        if self._advance_power_model:
+            robot_position, _ = self._robot_RG.get_pose_of_base_link()
+            _, _, imu_orientation = self._robot.get_imu_readings()
+            power_status = self._robot.subsystems.get_power_status(
+                robot_position,
+                imu_orientation["yaw"],
+                interval_s,
+                self._robot.subsystems.get_obc_state(),
+            )
+        else:
+            power_status = self._robot.subsystems.read_power_status()
 
         self._transmit(self._parameters_conf["battery_charge"], int(power_status["battery_percentage_measured"]))
         self._transmit(self._parameters_conf["battery_voltage"], power_status["battery_voltage_measured"])

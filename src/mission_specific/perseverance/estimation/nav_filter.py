@@ -138,8 +138,13 @@ class NavFilter:
         self.reset()
 
     # ── lifecycle ────────────────────────────────────────────────────────────────
-    def reset(self) -> None:
-        """New episode or teleport: local origin here, heading from the IMU, statistics cleared."""
+    def reset(self, origin=(0.0, 0.0), reacquisitions: int = 0) -> None:
+        """
+        New episode or teleport: the position estimate restarts at `origin` in the local frame, heading
+        from the IMU, statistics cleared, and the reacquisition counter restarts at `reacquisitions`.
+        """
+        self._origin = (float(origin[0]), float(origin[1]))
+        self._initial_reacquisitions = int(reacquisitions)
         self._time = 0.0
         self._window_start = 0.0
         self._window.flush()
@@ -183,7 +188,7 @@ class NavFilter:
         commanded = getattr(self._drive, "last_wheel_command", None) if self._drive is not None else None
 
         if not self._initialized:
-            self.ekf.reset(heading=heading)
+            self.ekf.reset(heading=heading, position=self._origin, reacquisitions=self._initial_reacquisitions)
             self._initialized = True
         else:
             self.ekf.predict(imu, dt)
@@ -276,6 +281,8 @@ class NavFilter:
         row.update({f"steer.{k}": v for k, v in steer.items()})
         row.update({f"cmd.{k}": v for k, v in (commanded or {}).items()})
         row.update({f"ekf.{k}": v for k, v in self.ekf.state().items()})
+        # The filter's own 1-sigma per state, so its error can be checked against what it claims.
+        row.update({f"ekf_sigma.{k}": v for k, v in self.ekf.sigma().items()})
         if self._truth_fn is not None:
             position, orientation = self._truth_fn()
             row.update({f"truth.p{i}": float(v) for i, v in enumerate(position)})
@@ -289,6 +296,9 @@ class NavFilter:
         os.makedirs(self._dump_path, exist_ok=True)
         keys = sorted({k for row in self._dump_rows for k in row})
         arrays = {k: np.array([row.get(k, np.nan) for row in self._dump_rows], dtype=float) for k in keys}
+        # The odometry noise the recorded sigmas include, one value per row like every other array, so
+        # a reader can tell a dump made before q_odometry existed (no key) from one made with it.
+        arrays["ekf_config.q_odometry"] = np.full(len(self._dump_rows), self.ekf.process_noise.q_odometry)
         path = os.path.join(self._dump_path, f"{tag}.npz")
         np.savez_compressed(path, **arrays)
         self._dump_rows = []

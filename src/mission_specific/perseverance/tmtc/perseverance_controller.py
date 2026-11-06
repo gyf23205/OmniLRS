@@ -37,7 +37,10 @@ class PerseveranceController(YamcsTMTC):
         drive_controller,
         fault_injector=None,
         nav_filter=None,
+        advance_power_model=False,
     ):
+        """advance_power_model: see PerseveranceTransmitter. Leave False when the launch script steps
+        the power model every physics step."""
         super().__init__(yamcs_instance_conf, yamcs_conf, robot_name, robot_RG, robot)
         self._intervals = yamcs_conf["intervals"]
         self._transmit_errors = 0
@@ -57,6 +60,7 @@ class PerseveranceController(YamcsTMTC):
             drive_controller=drive_controller,
             fault_injector=fault_injector,
             nav_filter=nav_filter,
+            advance_power_model=advance_power_model,
         )
         self._commander: PerseveranceCommander = PerseveranceCommander(
             self._robot,
@@ -177,9 +181,10 @@ class PerseveranceController(YamcsTMTC):
             ("Pose of base link", self._transmitter.transmit_pose_of_base_link, ()),
             ("IMU readings", self._transmitter.transmit_imu_readings, ()),
             ("Wheel contact forces", self._transmitter.transmit_contact_forces, ()),
-            ("Motor encoder", self._transmitter.transmit_wheels_joint_angles, ()),
+            ("Motor encoder", self._transmitter.transmit_motor_encoder, ()),
             ("Motor effort", self._transmitter.transmit_motor_effort, ()),
             ("Steer encoder", self._transmitter.transmit_steer_encoder, ()),
+            ("Joint setpoints", self._transmitter.transmit_joint_setpoints, ()),
             ("Power status", self._transmitter.transmit_power_info, [period]),
             ("Thermal info", self._transmitter.transmit_thermal_info, [period]),
             ("Radio rssi", self._transmitter.transmit_radio_signal_info, ()),

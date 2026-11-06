@@ -165,13 +165,14 @@ class MissionScripter:
     def crater_phase(self) -> str:
         return self._crater_phase
 
-    def reset(self, seed: int, origin: Tuple[float, float], crater=None) -> None:
+    def reset(self, seed: int, origin: Tuple[float, float], crater=None, start_s: float = 0.0) -> None:
+        """start_s: when the first command may go out. Negative while the episode runs a pre-roll."""
         self._rng = random.Random(seed)
         self._housekeeping_rng = random.Random(_housekeeping_seed(seed))
         self._pending_restore = None
         self._housekeeping_plan = self._plan_housekeeping()
         self._origin = (float(origin[0]), float(origin[1]))
-        self._next_allowed_s = 0.0
+        self._next_allowed_s = float(start_s)
         self._issued = 0
         self._lost = 0
         self._last_status = None

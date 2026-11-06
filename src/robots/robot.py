@@ -94,6 +94,7 @@ class RobotManager:
             self.robot_parameters.scale,
             self.robot_parameters.usd_prim_path,
             self.robot_parameters.steer_joints,
+            physics=self.robot_parameters.physics,
         )
         self.add_RRG(
             self.robot_parameters.robot_name,
@@ -131,6 +132,7 @@ class RobotManager:
             self.robot_parameters.scale,
             self.robot_parameters.usd_prim_path,
             self.robot_parameters.steer_joints,
+            physics=self.robot_parameters.physics,
         )
         self.add_RRG(
             self.robot_parameters.robot_name,
@@ -156,6 +158,7 @@ class RobotManager:
         scale:float=1.0,
         usd_prim_path:str="",
         steer_joints:List[str]=None,
+        physics:Dict=None,
     ) -> None:
         """
         Add a robot to the scene.
@@ -188,6 +191,7 @@ class RobotManager:
             scale=scale,
             usd_prim_path=usd_prim_path,
             steer_joints=steer_joints,
+            physics=physics,
         )
         self.robot.load(p, q)
 
@@ -213,6 +217,11 @@ class RobotManager:
             pose_base_link,
         )
         rrg.initialize(world)
+        physics = getattr(self.robot_parameters, "physics", None) or {}
+        if physics.get("contact_force_window"):
+            rrg.enable_contact_window(world)
+        if physics.get("wheel_speed_window"):
+            self.robot.enable_wheel_speed_window(world)
         self.robot_RG = rrg
         # The robot reaches its own links' velocities, contact forces and applied forces through
         # this, so a fault injector can keep talking to the Robot alone.
@@ -258,7 +267,7 @@ class Robot:
         scale:float = 1.0,
         usd_prim_path:str = "",
         steer_joints:List[str] = None,
-
+        physics:Dict = None,
     ) -> None:
         """
         Args:
@@ -284,6 +293,7 @@ class Robot:
         self.root_body_id = None
         self._wheel_joint_names = wheel_joints
         self._steer_joint_names = steer_joints or []
+        self._physics = dict(physics or {})
         self._dofs = {} # dof = Degree of Freedom
         # Name-keyed dofs for per-wheel drive and corner steering; see _init_named_dofs.
         self._wheel_dofs = None
@@ -415,6 +425,7 @@ class Robot:
         # wheel. Authoring both here, while the rover is still just usd, means PhysX parses the
         # wheels once, already valid. _initialize_cameras() below pumps the app, which is what
         # triggers that first parse.
+        self.install_physics_overrides()
         self.install_wheel_sinkage()
 
         self.edit_graphs()
@@ -810,6 +821,70 @@ class Robot:
         for wheel_name in self._wheel_materials:
             self.set_wheel_friction(wheel_name, self._nominal_wheel_friction)
 
+    def install_physics_overrides(self) -> None:
+        """
+        Apply the robot config's `physics` section to the usd, before PhysX first parses the robot.
+
+        articulation_sleep_threshold, articulation_stabilization_threshold: a still articulation
+            otherwise goes to sleep, and a sleeping one reports no contacts and frozen sensors.
+        link_masses: kg per rigid-body link name. The usd authors no inertia, so PhysX derives each
+            link's inertia from its collision shape and the new mass.
+        free_joints: revolute joint name -> [lower, upper] limit in degrees. The joint's angular
+            drive keeps its damping but loses its stiffness, so the joint pivots freely within the
+            limits instead of being sprung back to 0.
+        mimic_joints: joint name -> {reference, gearing}. PhysX holds
+            angle + gearing * reference_angle = 0, so gearing 1 keeps two joints equal and opposite:
+            the differential that links a rocker-bogie's two rockers.
+        """
+        if not self._physics:
+            return
+        from pxr import PhysxSchema
+
+        self.stage = omni.usd.get_context().get_stage()
+        root = self.stage.GetPrimAtPath(self.robot_path)
+        bodies, joints = {}, {}
+        for prim in Usd.PrimRange(root):
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                bodies[prim.GetName()] = prim
+            if prim.IsA(UsdPhysics.Joint):
+                joints[prim.GetName()] = prim
+            if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                articulation = PhysxSchema.PhysxArticulationAPI.Apply(prim)
+                for key, attr in (("articulation_sleep_threshold", articulation.CreateSleepThresholdAttr),
+                                  ("articulation_stabilization_threshold", articulation.CreateStabilizationThresholdAttr)):
+                    if key in self._physics:
+                        attr().Set(float(self._physics[key]))
+
+        def named(table, name, kind):
+            if name not in table:
+                raise ValueError(f"physics override: no {kind} named {name!r} under {self.robot_path}")
+            return table[name]
+
+        for name, mass in (self._physics.get("link_masses") or {}).items():
+            UsdPhysics.MassAPI.Apply(named(bodies, name, "rigid body")).CreateMassAttr().Set(float(mass))
+
+        for name, (lower, upper) in (self._physics.get("free_joints") or {}).items():
+            prim = named(joints, name, "joint")
+            revolute = UsdPhysics.RevoluteJoint(prim)
+            revolute.CreateLowerLimitAttr().Set(float(lower))
+            revolute.CreateUpperLimitAttr().Set(float(upper))
+            drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+            if drive:
+                drive.CreateStiffnessAttr().Set(0.0)
+
+        for name, spec in (self._physics.get("mimic_joints") or {}).items():
+            prim = named(joints, name, "joint")
+            reference = named(joints, spec["reference"], "joint")
+            axis = "rot" + UsdPhysics.RevoluteJoint(prim).GetAxisAttr().Get()
+            mimic = PhysxSchema.PhysxMimicJointAPI.Apply(prim, axis)
+            mimic.CreateReferenceJointRel().SetTargets([reference.GetPath()])
+            mimic.CreateReferenceJointAxisAttr().Set("rot" + UsdPhysics.RevoluteJoint(reference).GetAxisAttr().Get())
+            mimic.CreateGearingAttr().Set(float(spec.get("gearing", 1.0)))
+            mimic.CreateOffsetAttr().Set(float(spec.get("offset", 0.0)))
+
+        print(f"[robot] physics overrides on {self.robot_path}: "
+              f"{', '.join(k for k in self._physics if k != 'contact_force_window')}", flush=True)
+
     def install_wheel_sinkage(self, contact_margin_m: float = 0.02) -> None:
         """
         Make each wheel collider's rest offset explicit, so a sinkage fault can change it mid-run.
@@ -972,9 +1047,9 @@ class Robot:
         """
         Measured drive joint rates in rad/s, in the order given.
 
-        The unwrapped rate the onboard navigation filter needs at physics rate. The downlinked
-        motor_encoder is an angle wrapped to one revolution and sampled at 1 Hz, which aliases at
-        normal driving speeds. Padded with 0.0 for a wheel that failed to resolve, like the efforts.
+        The unwrapped rate the onboard navigation filter needs at physics rate; get_wheels_joint_angles
+        is wrapped to one revolution, which aliases at normal driving speeds when sampled at 1 Hz.
+        Padded with 0.0 for a wheel that failed to resolve, like the efforts.
         """
         self._init_named_dofs()
 
@@ -988,6 +1063,44 @@ class Robot:
             velocities.append(float(state.vel))
 
         return velocities
+
+    def enable_wheel_speed_window(self, world: World) -> None:
+        """
+        Average each drive wheel's measured joint rate over the interval between reads, sampling
+        every physics step from a physics callback. A single sample at a 1 Hz downlink tick catches one
+        33 ms step of a rate that contact jitter moves from step to step.
+        """
+        self._speed_names = self._drive_wheel_names()
+        self._speed_sum = np.zeros(len(self._speed_names))
+        self._speed_steps = 0
+        self._speed_sample_failed = False
+        world.add_physics_callback(f"{self.robot_name.strip('/')}_wheel_speed_window", self._sample_wheel_speeds)
+
+    def _sample_wheel_speeds(self, step_size: float) -> None:
+        try:
+            self._speed_sum += np.asarray(self.get_wheel_joint_velocities(self._speed_names), dtype=float)
+            self._speed_steps += 1
+        except Exception as exc:  # the articulation is briefly unavailable across a world reset
+            if not self._speed_sample_failed:
+                print(f"[robot] wheel speed window could not sample this step: {exc}", flush=True)
+                self._speed_sample_failed = True
+
+    def reset_wheel_speed_window(self) -> None:
+        """Drop the steps summed so far, e.g. so a new episode does not inherit the last one's tail."""
+        if hasattr(self, "_speed_sum"):
+            self._speed_sum[:] = 0.0
+            self._speed_steps = 0
+
+    def get_mean_wheel_joint_velocities(self, wheel_names: List[str]) -> List[float]:
+        """
+        Mean drive joint rate in rad/s per wheel since the previous call, in the order given, then a
+        new window. Falls back to this step's reading when averaging is off or no step has elapsed.
+        """
+        if not getattr(self, "_speed_steps", 0):
+            return self.get_wheel_joint_velocities(wheel_names)
+        mean = dict(zip(self._speed_names, self._speed_sum / self._speed_steps))
+        self.reset_wheel_speed_window()
+        return [float(mean.get(name, 0.0)) for name in wheel_names]
 
     def _drive_wheel_names(self) -> List[str]:
         return [
@@ -1333,6 +1446,43 @@ class RobotRigidGroup:
             linear_velocities[i, :] = velocities[:3]
             angular_velocities[i, :] = velocities[3:6]
         return linear_velocities, angular_velocities
+
+    def enable_contact_window(self, world: World) -> None:
+        """
+        Average each link's net contact force over the interval between reads, sampling every physics
+        step from a physics callback. A single-step reading is impulsive: a wheel's contact can switch
+        on and off from one step to the next while its mean load stays steady.
+        """
+        self._contact_sum = np.zeros((len(self.prim_views), 3))
+        self._contact_steps = 0
+        self._contact_sample_failed = False
+        world.add_physics_callback(f"{self.robot_name.strip('/')}_contact_window", self._sample_contacts)
+
+    def _sample_contacts(self, step_size: float) -> None:
+        try:
+            self._contact_sum += self.get_net_contact_forces()
+            self._contact_steps += 1
+        except Exception as exc:  # the views are briefly invalid across a world reset
+            if not self._contact_sample_failed:
+                print(f"[robot] contact window could not sample this step: {exc}", flush=True)
+                self._contact_sample_failed = True
+
+    def reset_contact_window(self) -> None:
+        """Drop the steps summed so far, e.g. so a new episode does not inherit the last one's tail."""
+        if hasattr(self, "_contact_sum"):
+            self._contact_sum[:] = 0.0
+            self._contact_steps = 0
+
+    def get_mean_net_contact_forces(self) -> np.ndarray:
+        """
+        Mean net contact force on each target link since the previous call, then a new window.
+        Falls back to this step's reading when averaging is off or no step has elapsed.
+        """
+        if not getattr(self, "_contact_steps", 0):
+            return self.get_net_contact_forces()
+        mean = self._contact_sum / self._contact_steps
+        self.reset_contact_window()
+        return mean
 
     def get_net_contact_forces(self) -> np.ndarray:
         """

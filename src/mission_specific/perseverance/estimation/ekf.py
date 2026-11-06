@@ -110,12 +110,17 @@ class NavEKF:
         self.P = np.eye(M.STATE_DIM)
         self.reset()
 
-    def reset(self, heading: float = 0.0, heading_sigma: float = math.radians(2.0)) -> None:
-        """Origin at the current position, heading from the IMU, at rest, biases unknown but small."""
+    def reset(self, heading: float = 0.0, heading_sigma: float = math.radians(2.0),
+              position: Tuple[float, float] = (0.0, 0.0), reacquisitions: int = 0) -> None:
+        """
+        Position given in the local frame (the origin by default), heading from the IMU, at rest,
+        biases unknown but small. reacquisitions starts the counter there instead of at zero.
+        """
         self._clock = 0.0
         self._rejected_since: Dict[str, float] = {}
-        self.reacquisitions = 0
+        self.reacquisitions = int(reacquisitions)
         self.x = np.zeros(M.STATE_DIM)
+        self.x[M.PX], self.x[M.PY] = float(position[0]), float(position[1])
         self.x[M.PSI] = M.wrap_angle(heading)
         self.P = np.diag([
             1e-6, 1e-6,               # position: the origin is defined here
@@ -129,8 +134,10 @@ class NavEKF:
     # ── prediction ────────────────────────────────────────────────────────────────
     def predict(self, imu: M.ImuInput, dt: float) -> None:
         self._clock += dt
+        # Distance driven over this step, from the speeds the step starts with (odometry share of Q).
+        distance = math.hypot(self.x[M.V], self.x[M.VLAT]) * dt
         self.x, F = M.propagate(self.x, imu, dt, self.gravity)
-        self.P = F @ self.P @ F.T + M.process_noise(self.process_noise, dt)
+        self.P = F @ self.P @ F.T + M.process_noise(self.process_noise, dt, distance)
         self.P = 0.5 * (self.P + self.P.T)
 
     # ── generic scalar update ─────────────────────────────────────────────────────

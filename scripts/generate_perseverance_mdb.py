@@ -133,10 +133,12 @@ def build_telemetry(rover: System, faults: Subsystem) -> None:
     )
 
     # ── mobility ─────────────────────────────────────────────────────────────
+    # The encoder's rate, averaged onboard over the interval. It used to carry the drive joint angle
+    # (1024 counts per revolution), which, wrapped and sampled at 1 Hz, aliased at driving speed.
     ArrayParameter(
         system=rover, name="motor_encoder", data_source=LOCAL, length=6,
-        data_type=IntegerDataType(signed=False, bits=16),
-        short_description="Drive joint angles, 1024 counts per revolution",
+        data_type=FloatDataType(units="rad/s"),
+        short_description="Measured drive joint speed per wheel, mean over the downlink interval: front, mid, rear; left then right",
     )
     # Measured by the physics solver, not computed from the command. Encoder against pose shows a
     # wheel slipping; effort says why - near zero on ice, high in soft soil.
@@ -152,10 +154,23 @@ def build_telemetry(rover: System, faults: Subsystem) -> None:
         data_type=FloatDataType(units="deg"),
         short_description="Measured steer angle of the four corner joints",
     )
+    # Commanded, the counterpart of the two encoders above. Averaged over the downlink interval
+    # because the onboard controller updates them every physics step.
+    ArrayParameter(
+        system=rover, name="wheel_speed_setpoint", data_source=LOCAL, length=6,
+        data_type=FloatDataType(units="rad/s"),
+        short_description="Commanded drive joint speed per wheel, mean over the downlink interval",
+    )
+    ArrayParameter(
+        system=rover, name="steer_angle_setpoint", data_source=LOCAL, length=4,
+        data_type=FloatDataType(units="deg"),
+        short_description="Commanded steer angle of the four corner joints, mean over the downlink interval",
+    )
     for wheel in WHEELS:
         FloatParameter(
             system=rover, name=f"contact_force_{wheel}", data_source=LOCAL, units="N",
-            minimum=0.0, short_description=f"Net contact force on the {wheel.replace('_', ' ')} wheel",
+            minimum=0.0,
+            short_description=f"Net contact force on the {wheel.replace('_', ' ')} wheel, mean over the downlink interval",
         )
 
     # ── power ────────────────────────────────────────────────────────────────

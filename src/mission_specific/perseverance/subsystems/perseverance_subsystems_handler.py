@@ -98,6 +98,21 @@ class PerseveranceSubsystemsHandler(RobotSubsystemsHandler):
         self._thermal_model.compute(interval_s)
         return self._thermal_model.temperatures()
 
+    def set_thermal_history(self, robot_position, segments):
+        """
+        Face temperatures after a heading history: segments is [(yaw_deg, seconds held), ...], oldest
+        first, and the rover starts settled at the first yaw. Each segment relaxes every face toward
+        that heading's equilibrium along the model's own first-order response.
+        """
+        model = self._thermal_model
+        segments = list(segments)
+        model.set_temperatures(model.equilibrium_temperatures(robot_position, self._sun_pos, segments[0][0]))
+        for yaw_deg, seconds in segments:
+            target = model.equilibrium_temperatures(robot_position, self._sun_pos, yaw_deg)
+            remaining = math.exp(-max(0.0, float(seconds)) / model.time_constant)
+            model.set_temperatures({face: target[face] + (model._node_temps[face] - target[face]) * remaining
+                                    for face in target})
+
     def get_power_status(self, robot_position, robot_yaw_deg, interval_s, obc_state):
         # device states are reflected between the handler and power model, as they use the same dict
         self._power_model.set_inputs(
@@ -108,6 +123,14 @@ class PerseveranceSubsystemsHandler(RobotSubsystemsHandler):
             is_in_motor_state=(obc_state == ObcState.MOTOR),
         )
         self._power_model.compute(interval_s)
+        return self._power_model.get_outputs()
+
+    def read_power_status(self):
+        """
+        The power model's outputs as they stand, without advancing it. For a reader such as the
+        downlink when the simulation loop already advances the model every physics step through
+        get_power_status: advancing it from both places drains the battery twice.
+        """
         return self._power_model.get_outputs()
 
     def set_device_health_state(self, device_name: str, state: HealthState):

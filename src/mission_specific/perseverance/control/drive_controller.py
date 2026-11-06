@@ -109,6 +109,12 @@ class PerseveranceDriveController:
         self._heading_error: float = 0.0
         # What the joints were last asked for, for the navigation filter's command-tracking residual.
         self._last_wheel_command: Optional[Dict[str, float]] = None
+        self._last_steer_command: Optional[Dict[str, float]] = None
+        # Setpoints summed once per physics step since the last downlink. A 1 Hz observer needs what
+        # the joints were driven with across the interval, not one 33 ms sample of it.
+        self._setpoint_steer_sum: Dict[str, float] = {}
+        self._setpoint_wheel_sum: Dict[str, float] = {}
+        self._setpoint_steps = 0
 
     # ── telemetry accessors ──────────────────────────────────────────────────────
     @property
@@ -139,6 +145,45 @@ class PerseveranceDriveController:
     @property
     def steer_sign(self) -> float:
         return self._steer_sign
+
+    # ── joint setpoint window ────────────────────────────────────────────────────
+    def setpoint_window(self) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """
+        Mean (steer_angles, wheel_speeds) the joints were driven with since the previous call, then
+        start a new window.
+
+        Steer angles are radians in the joint frame (steer_sign applied), the frame steer_encoder
+        measures in. Wheel speeds are drive joint rad/s. Both are the controller's request: a fault
+        that alters what the joint actually receives is plant behaviour and is not reflected here.
+        With no step in the window, the setpoint currently held is returned instead.
+        """
+        if self._setpoint_steps == 0:
+            steer, wheels = self._held_setpoint()
+        else:
+            steer = {name: total / self._setpoint_steps for name, total in self._setpoint_steer_sum.items()}
+            wheels = {name: total / self._setpoint_steps for name, total in self._setpoint_wheel_sum.items()}
+        self.reset_setpoint_window()
+        return steer, wheels
+
+    def reset_setpoint_window(self) -> None:
+        """Drop the steps summed so far, e.g. so a new episode does not inherit the last one's tail."""
+        self._setpoint_steer_sum = {}
+        self._setpoint_wheel_sum = {}
+        self._setpoint_steps = 0
+
+    def _held_setpoint(self) -> Tuple[Dict[str, float], Dict[str, float]]:
+        if self._last_wheel_command is None:
+            return self._ackermann.stop()
+        return dict(self._last_steer_command or {}), dict(self._last_wheel_command)
+
+    def _sample_setpoint(self) -> None:
+        """Add the setpoint held over the physics step just simulated. Call exactly once per step."""
+        steer, wheels = self._held_setpoint()
+        for name, angle in steer.items():
+            self._setpoint_steer_sum[name] = self._setpoint_steer_sum.get(name, 0.0) + angle
+        for name, speed in wheels.items():
+            self._setpoint_wheel_sum[name] = self._setpoint_wheel_sum.get(name, 0.0) + speed
+        self._setpoint_steps += 1
 
     # ── pose ─────────────────────────────────────────────────────────────────────
     def pose(self) -> Tuple[float, float, float]:
@@ -276,6 +321,10 @@ class PerseveranceDriveController:
         also run the command update.
         """
         has_input = abs(linear_velocity) > 1e-6 or abs(point_turn_rate) > 1e-6
+        if has_input or self._status != CommandStatus.EXECUTING:
+            # This call writes the joints and the caller then skips update(), so the step is sampled
+            # here; on the remaining path update() runs and samples it.
+            self._sample_setpoint()
 
         if not has_input:
             if self._status == CommandStatus.EXECUTING:
@@ -301,6 +350,7 @@ class PerseveranceDriveController:
     # ── per-step update ──────────────────────────────────────────────────────────
     def update(self) -> None:
         """Advance the active command. Call once per physics step."""
+        self._sample_setpoint()
         if self._status != CommandStatus.EXECUTING:
             return
 
@@ -397,6 +447,7 @@ class PerseveranceDriveController:
         self._robot.set_steer_angles(steer_angles)
         self._robot.set_wheel_velocities(wheel_speeds)
         self._last_wheel_command = dict(wheel_speeds)
+        self._last_steer_command = dict(steer_angles)
 
     def _halt(self) -> None:
         steer, speeds = self._ackermann.stop()

@@ -99,6 +99,8 @@ class Yamcs_SimulationManager:
             self.TMTC = PerseveranceController(
                 self.cfg["mode"]["instance_conf"], self.RM.RM_conf.yamcs_tmtc,
                 robot_name, self.RM.robot_RG, self.RM.robot, self.drive_controller,
+                # This loop never steps the power model, so the downlink has to advance it.
+                advance_power_model=True,
             )
         elif controller_name == "":
             raise Exception("No robot controller was setup in yaml configurations.")

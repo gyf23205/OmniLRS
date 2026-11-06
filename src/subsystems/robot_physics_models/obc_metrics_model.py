@@ -44,10 +44,23 @@ class ObcMetricsModel(RobotPhysicsModel):
 
     def __init__(self):
         self._state = ObcState.IDLE
-        self._boot_ts = time.monotonic()
-    
+        # Seconds, from a monotonic clock. Wall time by default; a simulation that runs faster or
+        # slower than real time sets its own clock with set_clock().
+        self._clock = time.monotonic
+        self._boot_ts = self._clock()
+
     def initialize(self):
         pass
+
+    def set_clock(self, clock) -> None:
+        """Count uptime on clock() (seconds) instead of wall time. Keeps the current uptime."""
+        uptime = self._clock() - self._boot_ts
+        self._clock = clock
+        self._boot_ts = self._clock() - uptime
+
+    def set_uptime(self, seconds: float) -> None:
+        """Pretend the obc booted this many seconds ago."""
+        self._boot_ts = self._clock() - float(seconds)
 
     def set_inputs(self, state:ObcState):
         self._input_obc_state(state)
@@ -66,7 +79,7 @@ class ObcMetricsModel(RobotPhysicsModel):
     def _input_obc_state(self, state:ObcState):
         # First, check if need to reset uptime (whenever the controller transitions through OFF)
         if state == ObcState.OFF or (self._state == ObcState.OFF and state != ObcState.OFF):
-            self._boot_ts = time.monotonic()
+            self._boot_ts = self._clock()
         # keep track of the obc state internally:
         self._state = state
 
@@ -83,7 +96,7 @@ class ObcMetricsModel(RobotPhysicsModel):
         return self._usage_with_noise(base)
 
     def _get_obc_uptime(self):
-        elapsed = int(time.monotonic() - self._boot_ts)
+        elapsed = int(self._clock() - self._boot_ts)
         return elapsed % (2 ** 32)
 
     def _select_by_state(self, levels):

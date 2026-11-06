@@ -20,6 +20,12 @@ episode that inherited the previous one's flat battery would be labelled nominal
 like one. _reset_episode below is that list, and it is deliberately explicit about which of the
 resets are reaching past a public interface.
 
+A reset is not a power-on, though. Battery charge, face temperatures, obc uptime and the navigation
+filter's position and counter are then sampled as a mission in progress would have left them, and
+the episode runs a random pre-roll before t=0 that is not recorded. Without that, every one of those
+channels counts time from a fixed start, and a model trained on them can read the episode time off
+them (see the initial-state block of DEFAULTS).
+
 GO/NOGO. The interlock defaults to NOGO and the only thing that ever sets it is the Yamcs command
 handler, so a run without a ground station has every command rejected. Episode setup sets GO.
 
@@ -99,6 +105,35 @@ DEFAULTS = {
     # over the edge, and those rows would be labelled as ordinary driving.
     "fall_trim_s": 3.0,
     "recovery_settle_steps": 120,  # extra steps to let PhysX settle after a divergence
+    # ── initial state ──
+    # An episode is a window cut out of a longer mission, not a power-on. Started from one fixed
+    # state, every slow channel counts episode time from it: in run03 battery_charge alone explained
+    # 98.5% of the variance of time_s, temperature_bottom 99.6%, obc_uptime 88.7%. So each episode
+    # starts from a state sampled as the mission could have left it.
+    #
+    # Simulated before t=0 and not recorded, with the operator already driving, so the first row can
+    # fall anywhere in a leg rather than always on a rover at rest with a freshly reset filter. Fault
+    # onsets and the housekeeping window stay measured from t=0.
+    "preroll_s": [0.0, 60.0],
+    # Battery state of charge at the start of the pre-roll. Driving draws ~80 W and a battery fault up
+    # to 40 W more, at most ~35% of the 60 Wh pack in 600 s, so a drive is only started above half charge.
+    "battery_soc_range": [0.5, 1.0],
+    # Face temperatures: the rover has been driving for thermal_history_s, holding random headings for
+    # thermal_heading_hold_s each (about the spacing of the operator's commands), and holds its current
+    # heading for the last one. 1800 s is three thermal time constants, so the start is as spread as any
+    # later moment of a drive. A rover parked at one heading until settled is NOT a valid start: its faces
+    # sit at the extremes (-47 C away from the sun, up to +90 C facing it) and visibly relax toward the
+    # milder driving range over the episode, which run04 showed.
+    "thermal_history_s": 1800.0,
+    "thermal_heading_hold_s": [10.0, 60.0],
+    # Seconds since the obc booted: 30 min to 3 days. Uptime then counts simulation time from there.
+    "obc_uptime_range_s": [1800.0, 259200.0],
+    # The navigation filter's position starts this far (at most) from its frame origin, as it would
+    # after driving since the frame was last set, rather than at exactly (0, 0).
+    "estimator_origin_m": 50.0,
+    # The filter has run since boot, so its reacquisition counter does too: it starts at a Poisson draw
+    # with this rate times the uptime. 0.0067/s is the nominal rate in run03 (about 4 per 600 s).
+    "estimator_reacquisition_rate_hz": 0.0067,
 }
 
 
@@ -204,6 +239,13 @@ class EpisodeRunner:
         self._diverged = False
         # This episode's height map, read once after the scene is set up. None disables the fall check.
         self._dem = None
+        # Physics steps run before t=0 this episode, and the sampled initial state, for meta.json.
+        self._preroll_steps = 0
+        self._initial_state: Dict = {}
+
+        # Uptime in simulation seconds. Wall time would run at whatever speed the host steps physics.
+        if hasattr(self._subsystems, "set_obc_clock"):
+            self._subsystems.set_obc_clock(lambda: self._sim_time)
 
     # ── the run ──────────────────────────────────────────────────────────────────
     def run(self) -> Dict:
@@ -240,6 +282,7 @@ class EpisodeRunner:
                 "physics_dt": self._dt,
                 "downlink_period_s": self._config["downlink_period_s"],
                 "image_period_s": self._config["image_period_s"],
+                "initial_state": self._initial_state,
             })
 
             outcome = "complete"
@@ -285,9 +328,12 @@ class EpisodeRunner:
 
         render_every_step = bool(self._config["render_every_step"])
 
-        next_downlink, next_image = 0.0, image_period
+        # The pre-roll runs from a negative step. Its downlink ticks stay on the t=0 grid and record
+        # nothing, but they keep the thermal model and the interval windows going as a recorded tick would.
+        preroll_s = self._preroll_steps * self._dt
+        next_downlink, next_image = -math.floor(preroll_s / downlink) * downlink, image_period
         attempt = 0
-        self._step = 0
+        self._step = -self._preroll_steps
 
         while self._step < steps:
             if not self._is_running():
@@ -349,7 +395,12 @@ class EpisodeRunner:
                 print(f"[dataset] power status failed: {exc}", flush=True)
 
             # 6. the downlink, with the crater's ground truth beside the injector's
-            if self._sim_time >= next_downlink:
+            if self._sim_time >= next_downlink and self._sim_time < 0.0:
+                self._advance_thermal(position, downlink)
+                self._reset_windows()
+                # Rounded so the grid lands on exactly 0.0 and the first recorded tick is not skipped.
+                next_downlink = round(next_downlink + downlink, 9)
+            elif self._sim_time >= next_downlink:
                 extra = None
                 if self._crater_config is not None:
                     extra = crater_module.oracle_row(self._stamped_crater, position, self._crater_config)
@@ -490,8 +541,16 @@ class EpisodeRunner:
         self._robot.set_reset_pose(np.array(spawn), np.array(orientation))
         self._robot.reset()
 
+        # Its own rng, so adding or changing an initial-state draw never moves the spawn or the scene.
+        state_rng = random.Random(f"{episode_seed}:initial_state")
+        self._preroll_steps = int(round(self._uniform(state_rng, "preroll_s") / self._dt))
+        # The clock the obc uptime counts on; the loop takes it from here up to 0 over the pre-roll.
+        self._sim_time = -self._preroll_steps * self._dt
+
         self._reset_subsystems()
-        self._scripter.reset(episode_seed, (spawn[0], spawn[1]), scenario)
+        self._initial_state = {"preroll_s": round(self._preroll_steps * self._dt, 3)}
+        self._initial_state.update(self._sample_subsystem_state(state_rng))
+        self._scripter.reset(episode_seed, (spawn[0], spawn[1]), scenario, start_s=self._sim_time)
         self._images_saved = 0
 
         # A teleport moves the root body only; the wheels need a few steps to settle before the
@@ -514,11 +573,87 @@ class EpisodeRunner:
             else:
                 print("[dataset] the rover did not recover from the divergence", flush=True)
 
-        # After the settle: the filter's local origin and heading are the pose the episode starts from.
+        # After the settle, so the faces are warmed for the heading the rover actually landed at.
+        self._initial_state.update(self._sample_thermal_state(state_rng))
+
+        # After the settle: the filter's heading is the pose the episode starts from, its position a
+        # sampled point of its local frame.
         if self._nav is not None:
-            self._nav.reset()
+            uptime = float(self._initial_state.get("obc_uptime_s", 0.0))
+            angle = state_rng.uniform(-math.pi, math.pi)
+            radius = float(self._config["estimator_origin_m"]) * math.sqrt(state_rng.random())
+            origin = (radius * math.cos(angle), radius * math.sin(angle))
+            rate = float(self._config["estimator_reacquisition_rate_hz"])
+            reacquisitions = int(np.random.default_rng(state_rng.getrandbits(64)).poisson(rate * uptime))
+            self._nav.reset(origin=origin, reacquisitions=reacquisitions)
+            self._initial_state["estimator_origin_m"] = [round(origin[0], 3), round(origin[1], 3)]
+            self._initial_state["estimator_reacquisitions"] = reacquisitions
+        # Likewise the interval windows: the first must not include the last episode's tail.
+        self._reset_windows()
 
         return spawn
+
+    def _uniform(self, rng: random.Random, key: str) -> float:
+        low, high = self._config[key]
+        return rng.uniform(float(low), float(high))
+
+    def _reset_windows(self) -> None:
+        """Restart the means the downlink reports over its interval, as reading them at a tick would."""
+        if hasattr(self._drive, "reset_setpoint_window"):
+            self._drive.reset_setpoint_window()
+        if hasattr(self._robot_RG, "reset_contact_window"):
+            self._robot_RG.reset_contact_window()
+        if hasattr(self._robot, "reset_wheel_speed_window"):
+            self._robot.reset_wheel_speed_window()
+
+    def _sample_subsystem_state(self, rng: random.Random) -> Dict:
+        """Battery charge and obc uptime as a mission in progress would have them. Returns them for meta."""
+        subsystems = self._subsystems
+        state = {}
+        if hasattr(subsystems, "set_battery_state_of_charge"):
+            soc = self._uniform(rng, "battery_soc_range")
+            subsystems.set_battery_state_of_charge(soc)
+            state["battery_soc"] = round(soc, 4)
+        if hasattr(subsystems, "set_obc_uptime"):
+            uptime = self._uniform(rng, "obc_uptime_range_s")
+            subsystems.set_obc_uptime(uptime)
+            state["obc_uptime_s"] = round(uptime, 1)
+        return state
+
+    def _sample_thermal_state(self, rng: random.Random) -> Dict:
+        """Face temperatures with a sampled heading history behind them. Returns the history for meta."""
+        subsystems = self._subsystems
+        if not (hasattr(subsystems, "set_thermal_history") and hasattr(self._robot, "get_imu_readings")):
+            return {}
+        try:
+            # The same inputs the downlink feeds the thermal model: true position, imu yaw.
+            position, _ = self._robot_RG.get_pose_of_base_link()
+            _, _, imu_orientation = self._robot.get_imu_readings()
+            # Drawn backwards from now: the current heading for the last hold, random ones before it.
+            held = self._uniform(rng, "thermal_heading_hold_s")
+            segments = [(float(imu_orientation["yaw"]), held)]
+            total = held
+            while total < float(self._config["thermal_history_s"]):
+                held = self._uniform(rng, "thermal_heading_hold_s")
+                segments.append((rng.uniform(-180.0, 180.0), held))
+                total += held
+            subsystems.set_sun_position(self._sun_fn())
+            subsystems.set_thermal_history(np.asarray(position).tolist(), segments[::-1])
+        except Exception as exc:
+            print(f"[dataset] thermal initial state failed, faces start at the model default: {exc}",
+                  flush=True)
+            return {}
+        return {"thermal_segments": len(segments), "thermal_current_heading_held_s": round(segments[0][1], 1)}
+
+    def _advance_thermal(self, position, interval_s: float) -> None:
+        """Advance the thermal model as a downlink tick would, for the pre-roll, which has no ticks."""
+        if not hasattr(self._robot, "get_imu_readings") or not hasattr(self._subsystems, "get_thermal_status"):
+            return
+        try:
+            _, _, imu_orientation = self._robot.get_imu_readings()
+            self._subsystems.get_thermal_status(position, imu_orientation["yaw"], interval_s)
+        except Exception as exc:
+            print(f"[dataset] thermal status failed: {exc}", flush=True)
 
     def _spawn_height(self, x: float, y: float, fallback: float) -> float:
         """Just above the highest ground under the rover, or the configured height if the terrain is unknown."""
@@ -546,7 +681,8 @@ class EpisodeRunner:
         subsystems.set_solar_panel_state(SolarPanelState.DEPLOYED)
 
         try:
-            subsystems._setup_power_model()  # re-initialize() puts the pack back to full
+            # re-initialize() puts the pack back to full; _sample_subsystem_state then sets the charge.
+            subsystems._setup_power_model()
         except Exception as exc:
             print(f"[dataset] power model reset failed: {exc}", flush=True)
 

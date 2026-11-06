@@ -18,15 +18,16 @@ Three sampling rules, all of which come from what the dataset is for rather than
 MAJORITY NOMINAL. A detector needs negatives, so most episodes carry no fault at all. The default
 class weights put 60% of episodes clean.
 
-ONSET IN THE MIDDLE. A fault that starts at t=0 teaches a classifier to recognise a regime, not to
-detect a transition. Every onset is sampled inside a central window so each faulted episode holds
-three phases: a clean baseline, the transition, and the settled faulted regime.
+ONSET AFTER A CLEAN LEAD-IN. A fault that starts at t=0 teaches a classifier to recognise a regime,
+not to detect a transition. Every onset is sampled uniformly between onset_min_s (10 s) and
+onset_max (90% of the episode), so each faulted episode holds a clean baseline, the transition, and
+some settled faulted regime, while the onset time itself is not a learnable cue.
 
 OVERLAP IS RARE. Simultaneous faults happen and have to be represented, but they are the unusual
 case - about 9% of episodes. Sequential pairs (one recovers, another begins) are rarer still.
 
-Windows are expressed as fractions of the episode, so changing the episode length rescales
-everything and the three phases stay proportional.
+Apart from onset_min_s, windows are fractions of the episode, so changing the episode length
+rescales them.
 
 No omni/pxr imports - this module is testable with plain python3.
 """
@@ -85,24 +86,24 @@ DEFAULTS = {
         "battery": 1.0,
         "comms": 1.0,
     },
-    # Fractions of the episode. A single fault onsets in the middle; the phases either side are what
-    # make the transition learnable.
-    "onset_window": [0.40, 0.60],
+    # Every onset lands uniformly in [onset_min_s, onset_max * duration]: never inside the clean
+    # lead-in, and never so late that no faulted regime follows.
+    "onset_min_s": 10.0,
+    "onset_max": 0.90,
     # Concurrent pairs: the second fault follows this long after the first, and neither recovers, so
     # the overlap is guaranteed to be real rather than incidental.
     "concurrent_gap": [0.03, 0.12],
-    # Sequential pairs need room for four events, so they start earlier and use a wider span.
-    "sequential_first_onset": [0.20, 0.30],
+    # Sequential pairs: the first fault holds, clears, and after a gap the second begins. The first
+    # onset leaves room for hold + gap so the second still lands before onset_max.
     "sequential_hold": [0.15, 0.25],
     "sequential_gap": [0.05, 0.15],
-    "sequential_last_onset_max": 0.80,
     # A single fault sometimes clears on its own; a recovery transition is worth having in the data.
     "recovery_probability": 0.25,
     "recovery_hold": [0.15, 0.30],
     "recovery_onset_max": 0.90,
     # Severities start well above zero: a fault too weak to have an effect is a mislabelled nominal
     # episode, which is worse for training than no episode at all.
-    "severity_range": [0.30, 1.00],
+    "severity_range": [0.50, 1.00],
     # steer_stuck is an angle, not a severity. Sampled away from zero in both directions, since a
     # corner stuck at 0 deg is nearly indistinguishable from a healthy one driving straight.
     "steer_stuck_angle_deg": [10.0, 45.0],
@@ -278,6 +279,13 @@ def _uniform(rng: random.Random, bounds: Sequence[float]) -> float:
     return rng.uniform(low, high) if high > low else low
 
 
+def _sample_onset(rng: random.Random, duration_s: float, config: Dict, reserve_s: float = 0.0) -> float:
+    """An onset in [onset_min_s, onset_max * duration - reserve_s], reserve_s leaving room for what follows."""
+    low = float(config["onset_min_s"])
+    high = float(config["onset_max"]) * duration_s - reserve_s
+    return _uniform(rng, (low, max(low, high)))
+
+
 def _weighted_choice(rng: random.Random, weights: Dict[str, float], exclude: Sequence[str] = ()) -> str:
     names = [name for name, weight in weights.items() if weight > 0 and name not in exclude]
     if not names:
@@ -340,7 +348,7 @@ def _recoverable_kinds(config: Dict) -> Dict[str, float]:
 
 def _single_fault(rng: random.Random, duration_s: float, config: Dict) -> ScheduledFault:
     kind = _weighted_choice(rng, config["kind_weights"])
-    onset = _uniform(rng, config["onset_window"]) * duration_s
+    onset = _sample_onset(rng, duration_s, config)
 
     recovery = None
     if KIND_SHAPES[kind][2] and rng.random() < float(config["recovery_probability"]):
@@ -400,9 +408,9 @@ def generate(seed: int, duration_s: float, config: Optional[Dict] = None,
         first_kind = _weighted_choice(rng, config["kind_weights"])
         second_kind = _weighted_choice(rng, config["kind_weights"], exclude=(first_kind,))
 
-        first_onset = _uniform(rng, config["onset_window"]) * duration_s
         gap = _uniform(rng, config["concurrent_gap"]) * duration_s
-        second_onset = min(first_onset + gap, float(config["recovery_onset_max"]) * duration_s)
+        first_onset = _sample_onset(rng, duration_s, config, reserve_s=gap)
+        second_onset = first_onset + gap
 
         return FaultSchedule(episode_class, duration_s, [
             _make_fault(rng, first_kind, first_onset, duration_s, config),
@@ -414,16 +422,13 @@ def generate(seed: int, duration_s: float, config: Optional[Dict] = None,
     first_kind = _weighted_choice(rng, _recoverable_kinds(config))
     second_kind = _weighted_choice(rng, config["kind_weights"], exclude=(first_kind,))
 
-    first_onset = _uniform(rng, config["sequential_first_onset"]) * duration_s
-    recovery = first_onset + _uniform(rng, config["sequential_hold"]) * duration_s
-    second_onset = min(
-        recovery + _uniform(rng, config["sequential_gap"]) * duration_s,
-        float(config["sequential_last_onset_max"]) * duration_s,
-    )
-    # Clamp rather than resample, but never let the two touch: overlapping would make this a
-    # concurrent episode wearing the wrong label.
-    if second_onset <= recovery:
-        recovery = max(first_onset, second_onset - 1.0)
+    hold = _uniform(rng, config["sequential_hold"]) * duration_s
+    gap = _uniform(rng, config["sequential_gap"]) * duration_s
+    first_onset = _sample_onset(rng, duration_s, config, reserve_s=hold + gap)
+    recovery = first_onset + hold
+    # The gap keeps the two apart: overlapping would make this a concurrent episode wearing the
+    # wrong label.
+    second_onset = recovery + gap
 
     return FaultSchedule(episode_class, duration_s, [
         _make_fault(rng, first_kind, first_onset, duration_s, config, recovery),
@@ -438,7 +443,7 @@ def parse_spec(spec: str) -> Tuple[str, Optional[str], Tuple[float, ...], Option
 
     Same shapes as FaultInjector.apply_spec, plus an optional "@<seconds>" suffix for the onset:
 
-        wheel_slip:front_left:0.8          onset sampled in onset_window
+        wheel_slip:front_left:0.8          onset sampled in [onset_min_s, onset_max]
         wheel_slip:front_left:0.8@300      onset at 300 s of simulation time
 
     Raises ValueError rather than printing: a dataset run that silently drops its fault would record
@@ -488,8 +493,8 @@ def from_specs(specs: Sequence[str], seed: int, duration_s: float,
     """
     A schedule holding exactly the given faults, for recording a chosen scenario.
 
-    Kind, target and magnitudes come from the specs. An onset left out is drawn from onset_window
-    with the episode seed, so the episode still opens with a clean baseline. Nothing recovers.
+    Kind, target and magnitudes come from the specs. An onset left out is drawn from
+    [onset_min_s, onset_max] with the episode seed, so the episode still opens with a clean baseline. Nothing recovers.
     """
     config = merged_config(config)
     rng = random.Random(seed)
@@ -499,7 +504,7 @@ def from_specs(specs: Sequence[str], seed: int, duration_s: float,
     for spec in specs:
         kind, target, magnitudes, onset_s = parse_spec(spec)
         if onset_s is None:
-            onset_s = _uniform(rng, config["onset_window"]) * duration_s
+            onset_s = _sample_onset(rng, duration_s, config)
         elif onset_s >= duration_s:
             raise ValueError(f"onset {onset_s} s in {spec!r} is past the {duration_s:.1f} s episode")
         faults.append(ScheduledFault(kind, target, magnitudes, onset_s, mode=_mode_of(kind, magnitudes)))

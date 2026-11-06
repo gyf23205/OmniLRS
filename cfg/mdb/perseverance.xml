@@ -233,7 +233,11 @@ See https://github.com/yamcs/pymdb
           </Dimension>
         </DimensionList>
       </ArrayParameterType>
-      <IntegerParameterType name="motor_encoder__el" signed="false" sizeInBits="16"/>
+      <FloatParameterType name="motor_encoder__el" sizeInBits="32">
+        <UnitSet>
+          <Unit form="calibrated">rad/s</Unit>
+        </UnitSet>
+      </FloatParameterType>
       <FloatParameterType name="net_power" sizeInBits="32">
         <UnitSet>
           <Unit form="calibrated">W</Unit>
@@ -324,6 +328,23 @@ See https://github.com/yamcs/pymdb
           <Enumeration value="1" label="DEPLOYED" shortDescription="Panel deployed"/>
         </EnumerationList>
       </EnumeratedParameterType>
+      <ArrayParameterType name="steer_angle_setpoint" arrayTypeRef="steer_angle_setpoint__el">
+        <DimensionList>
+          <Dimension>
+            <StartingIndex>
+              <FixedValue>0</FixedValue>
+            </StartingIndex>
+            <EndingIndex>
+              <FixedValue>3</FixedValue>
+            </EndingIndex>
+          </Dimension>
+        </DimensionList>
+      </ArrayParameterType>
+      <FloatParameterType name="steer_angle_setpoint__el" sizeInBits="32">
+        <UnitSet>
+          <Unit form="calibrated">deg</Unit>
+        </UnitSet>
+      </FloatParameterType>
       <ArrayParameterType name="steer_encoder" arrayTypeRef="steer_encoder__el">
         <DimensionList>
           <Dimension>
@@ -381,6 +402,23 @@ See https://github.com/yamcs/pymdb
           <Unit form="calibrated">A</Unit>
         </UnitSet>
       </FloatParameterType>
+      <ArrayParameterType name="wheel_speed_setpoint" arrayTypeRef="wheel_speed_setpoint__el">
+        <DimensionList>
+          <Dimension>
+            <StartingIndex>
+              <FixedValue>0</FixedValue>
+            </StartingIndex>
+            <EndingIndex>
+              <FixedValue>5</FixedValue>
+            </EndingIndex>
+          </Dimension>
+        </DimensionList>
+      </ArrayParameterType>
+      <FloatParameterType name="wheel_speed_setpoint__el" sizeInBits="32">
+        <UnitSet>
+          <Unit form="calibrated">rad/s</Unit>
+        </UnitSet>
+      </FloatParameterType>
     </ParameterTypeSet>
     <ParameterSet>
       <Parameter name="active_command" parameterTypeRef="active_command" shortDescription="Last high-level command the rover acknowledged">
@@ -404,22 +442,22 @@ See https://github.com/yamcs/pymdb
       <Parameter name="command_target" parameterTypeRef="command_target" shortDescription="Commanded goto waypoint">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="contact_force_front_left" parameterTypeRef="contact_force_front_left" shortDescription="Net contact force on the front left wheel">
+      <Parameter name="contact_force_front_left" parameterTypeRef="contact_force_front_left" shortDescription="Net contact force on the front left wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="contact_force_front_right" parameterTypeRef="contact_force_front_right" shortDescription="Net contact force on the front right wheel">
+      <Parameter name="contact_force_front_right" parameterTypeRef="contact_force_front_right" shortDescription="Net contact force on the front right wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="contact_force_mid_left" parameterTypeRef="contact_force_mid_left" shortDescription="Net contact force on the mid left wheel">
+      <Parameter name="contact_force_mid_left" parameterTypeRef="contact_force_mid_left" shortDescription="Net contact force on the mid left wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="contact_force_mid_right" parameterTypeRef="contact_force_mid_right" shortDescription="Net contact force on the mid right wheel">
+      <Parameter name="contact_force_mid_right" parameterTypeRef="contact_force_mid_right" shortDescription="Net contact force on the mid right wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="contact_force_rear_left" parameterTypeRef="contact_force_rear_left" shortDescription="Net contact force on the rear left wheel">
+      <Parameter name="contact_force_rear_left" parameterTypeRef="contact_force_rear_left" shortDescription="Net contact force on the rear left wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="contact_force_rear_right" parameterTypeRef="contact_force_rear_right" shortDescription="Net contact force on the rear right wheel">
+      <Parameter name="contact_force_rear_right" parameterTypeRef="contact_force_rear_right" shortDescription="Net contact force on the rear right wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
       <Parameter name="current_draw_camera" parameterTypeRef="current_draw_camera" shortDescription="Current consumed by the camera system">
@@ -455,7 +493,7 @@ See https://github.com/yamcs/pymdb
       <Parameter name="motor_effort" parameterTypeRef="motor_effort" shortDescription="Measured drive joint torque per wheel: front, mid, rear; left then right">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
-      <Parameter name="motor_encoder" parameterTypeRef="motor_encoder" shortDescription="Drive joint angles, 1024 counts per revolution">
+      <Parameter name="motor_encoder" parameterTypeRef="motor_encoder" shortDescription="Measured drive joint speed per wheel, mean over the downlink interval: front, mid, rear; left then right">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
       <Parameter name="net_power" parameterTypeRef="net_power" shortDescription="Solar input power minus total load">
@@ -485,6 +523,9 @@ See https://github.com/yamcs/pymdb
       <Parameter name="solar_panel_state" parameterTypeRef="solar_panel_state" shortDescription="Solar panel deployment state">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
+      <Parameter name="steer_angle_setpoint" parameterTypeRef="steer_angle_setpoint" shortDescription="Commanded steer angle of the four corner joints, mean over the downlink interval">
+        <ParameterProperties dataSource="local" persistence="true"/>
+      </Parameter>
       <Parameter name="steer_encoder" parameterTypeRef="steer_encoder" shortDescription="Measured steer angle of the four corner joints">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
@@ -510,6 +551,9 @@ See https://github.com/yamcs/pymdb
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
       <Parameter name="total_current_out" parameterTypeRef="total_current_out" shortDescription="Total current draw">
+        <ParameterProperties dataSource="local" persistence="true"/>
+      </Parameter>
+      <Parameter name="wheel_speed_setpoint" parameterTypeRef="wheel_speed_setpoint" shortDescription="Commanded drive joint speed per wheel, mean over the downlink interval">
         <ParameterProperties dataSource="local" persistence="true"/>
       </Parameter>
     </ParameterSet>

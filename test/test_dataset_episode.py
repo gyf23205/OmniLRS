@@ -92,6 +92,11 @@ class FakeSubsystems:
         self.power_setups = 0
         self.parasitic_load = 0.0
         self.sun = None
+        self.soc_draws = []
+        self.uptime_draws = []
+        self.obc_clock = None
+        self.thermal_histories = []
+        self.thermal_advances = 0
 
     def get_device_power_state(self, device):
         return self._devices[device].power_state
@@ -137,6 +142,23 @@ class FakeSubsystems:
     def get_power_status(self, position, yaw_deg, dt, obc_state):
         # A real load: the battery has to be seen to drain, and to come back on reset.
         self._power_model.drain(0.01 + self.parasitic_load * dt / 3600.0)
+        return {}
+
+    def set_battery_state_of_charge(self, fraction):
+        self.soc_draws.append(fraction)
+        self._power_model._battery_charge_wh = fraction * self._power_model._battery_capacity_wh
+
+    def set_obc_clock(self, clock):
+        self.obc_clock = clock
+
+    def set_obc_uptime(self, seconds):
+        self.uptime_draws.append(seconds)
+
+    def set_thermal_history(self, position, segments):
+        self.thermal_histories.append(list(segments))
+
+    def get_thermal_status(self, position, yaw_deg, interval_s):
+        self.thermal_advances += 1
         return {}
 
 
@@ -208,6 +230,9 @@ class FakeRobot:
 
     def set_camera_corruption(self, noise=0.0):
         self.camera_noise = noise
+
+    def get_imu_readings(self):
+        return self._last_imu[0]
 
     def set_reset_pose(self, position, orientation):
         self.reset_poses.append((list(position), list(orientation)))
@@ -345,7 +370,8 @@ PHYSICS_DT = 0.0333
 
 
 def build_run(tmp, episodes=6, seed=0, scheduler_config=None, record_images=False,
-              crater_config=None, drive_cls=None, environment=None, terrain_resolution=None):
+              crater_config=None, drive_cls=None, environment=None, terrain_resolution=None,
+              preroll_s=None):
     world = FakeWorld()
     RM = FakeRobotManager()
     drive = (drive_cls or FakeDrive)(RM.robot_RG)
@@ -362,7 +388,8 @@ def build_run(tmp, episodes=6, seed=0, scheduler_config=None, record_images=Fals
         spawn=(10.0, 10.0, 3.0),
         episodes=episodes,
         seed=seed,
-        config={**DATASET_CFG.get("episode", {}), "episode_steps": STEPS, "settle_steps": 5},
+        config={**DATASET_CFG.get("episode", {}), "episode_steps": STEPS, "settle_steps": 5,
+                **({} if preroll_s is None else {"preroll_s": preroll_s})},
         scheduler_config=scheduler_config or DATASET_CFG.get("faults"),
         mission_config=DATASET_CFG.get("mission"),
         environment=environment,
@@ -425,8 +452,35 @@ check("telemetry ticks at the downlink period, not the physics rate",
 check("the battery drains within an episode",
       float(read_csv(episodes[0] / "oracle/truth.csv")[0]["oracle.battery_charge_wh"]) >
       float(read_csv(episodes[0] / "oracle/truth.csv")[-1]["oracle.battery_charge_wh"]))
-check("and comes back full for the next one",
-      abs(float(read_csv(episodes[1] / "oracle/truth.csv")[0]["oracle.battery_charge_wh"]) - 60.0) < 0.5)
+
+print("\n=== each episode starts from a sampled state, not a power-on ===")
+_subsystems = RM.robot.subsystems
+_metas = [json.loads((d / "meta.json").read_text()) for d in episodes]
+_low, _high = DATASET_CFG["episode"]["battery_soc_range"]
+check("the battery charge is drawn once per episode, inside its range",
+      len(_subsystems.soc_draws) == 6 and all(_low <= f <= _high for f in _subsystems.soc_draws))
+check("and differs between episodes", len(set(_subsystems.soc_draws)) == 6)
+check("the obc uptime is drawn once per episode", len(set(_subsystems.uptime_draws)) == 6)
+check("uptime counts simulation time, not wall time",
+      _subsystems.obc_clock is not None and _subsystems.obc_clock() == runner._sim_time)
+check("the faces get a heading history once per episode", len(_subsystems.thermal_histories) == 6)
+check("the history covers thermal_history_s and ends at the current imu yaw",
+      all(sum(d for _, d in h) >= DATASET_CFG["episode"]["thermal_history_s"] and h[-1][0] == 10.0
+          for h in _subsystems.thermal_histories))
+check("meta.json records the draws",
+      all({"preroll_s", "battery_soc", "obc_uptime_s", "thermal_segments"} <= set(m["initial_state"])
+          for m in _metas))
+_prerolls = [m["initial_state"]["preroll_s"] for m in _metas]
+_low, _high = DATASET_CFG["episode"]["preroll_s"]
+check(f"the pre-roll length is drawn per episode {_prerolls}",
+      len(set(_prerolls)) == 6 and all(_low <= p <= _high + PHYSICS_DT for p in _prerolls))
+check("the pre-roll costs steps but not rows: ticks still cover the episode from t=0",
+      all(float(read_csv(d / "observable/telemetry.csv")[0]["time_s"]) == 0.0 and
+          abs(len(read_csv(d / "observable/telemetry.csv")) - STEPS * PHYSICS_DT) <= 2 for d in episodes))
+_early = [json.loads(line) for d in episodes for line in (d / "observable/commands.jsonl").read_text().splitlines()
+          if line.strip() and json.loads(line)["time_s"] < 0]
+check(f"the operator already drives during the pre-roll ({len(_early)} commands before t=0)", len(_early) > 0)
+check("the thermal model advances on the pre-roll's downlink grid", _subsystems.thermal_advances > 0)
 
 # ── labels line up with telemetry ────────────────────────────────────────────
 print("\n=== labels line up with the telemetry ===")
@@ -556,7 +610,9 @@ class DivergingRobotGroup(FakeRobotGroup):
 
 
 tmp_diverge = tempfile.mkdtemp(prefix="dsep-")
-world, RM, drive, injector, recorder, runner, environment = build_run(tmp_diverge, episodes=2)
+# No pre-roll: the blow-up is timed in pose reads from the first loop step, and must land in the
+# recorded part of the episode.
+world, RM, drive, injector, recorder, runner, environment = build_run(tmp_diverge, episodes=2, preroll_s=[0.0, 0.0])
 RM.robot_RG = DivergingRobotGroup(after=200)
 runner._robot_RG = RM.robot_RG
 # The teleport is what brings PhysX back; model that by clearing the fault on reset.
@@ -655,6 +711,9 @@ terrain = TerrainEnvironment()
 world, RM, drive, injector, recorder, runner, environment = build_run(
     tmp_crater, episodes=6, seed=4, scheduler_config=mix_cfg, crater_config=crater_cfg,
     drive_cls=CraterDrive, environment=terrain,
+    # No pre-roll: FakeDrive slides the rover 1 cm a step even while turning in place, and a minute of
+    # that walks it into the crater before the dash. A real turn in place does not translate.
+    preroll_s=[0.0, 0.0],
 )
 manifest = runner.run()
 episode_meta = [json.loads((Path(tmp_crater) / f"episodes/ep_{i:04d}/meta.json").read_text())
@@ -836,6 +895,8 @@ tmp_fall = tempfile.mkdtemp(prefix="dsep-")
 world, RM, drive, injector, recorder, runner, environment = build_run(
     tmp_fall, episodes=2, seed=5, environment=TerrainEnvironment(), terrain_resolution=0.025,
     record_images=True,
+    # No pre-roll: the fall is timed in pose reads from the first loop step, after recording starts.
+    preroll_s=[0.0, 0.0],
 )
 RM.robot_RG = runner._robot_RG = FallingRobotGroup(fall_after_s=20.0)
 _original_fall_reset = RM.robot.reset

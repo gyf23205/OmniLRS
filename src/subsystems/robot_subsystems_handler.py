@@ -92,3 +92,15 @@ class RobotSubsystemsHandler(ABC):
     def set_parasitic_load(self, watts: float):
         """Extra battery load in watts, used by fault injection. Zero is a healthy rover."""
         self._power_model.set_parasitic_load(watts)
+
+    def set_battery_state_of_charge(self, fraction: float):
+        """Stored charge as a fraction of capacity, for starting a run somewhere other than full."""
+        self._power_model.set_state_of_charge(fraction)
+
+    def set_obc_clock(self, clock):
+        """Count obc uptime on clock() (seconds), e.g. simulation time, instead of wall time."""
+        self._obc_metrics_model.set_clock(clock)
+
+    def set_obc_uptime(self, seconds: float):
+        """Pretend the obc booted this many seconds ago."""
+        self._obc_metrics_model.set_uptime(seconds)

@@ -110,6 +110,28 @@ class ThermalModel(RobotPhysicsModel):
             for name, value in self._node_temps.items()
         }
 
+    def equilibrium_temperatures(self, rover_position, sun_position, rover_yaw_deg) -> Dict[str, float]:
+        """The temperature each face settles at if the rover holds this pose, without advancing the model."""
+        saved_yaw = self._rover_yaw_deg
+        self._rover_yaw_deg = rover_yaw_deg
+        try:
+            view_factors = self._compute_view_factors(rover_position, sun_position)
+        finally:
+            self._rover_yaw_deg = saved_yaw
+        return {
+            face: self._target_temperature(_clamp(view_factors.get(face, 0.0), 0.0, 1.0))
+            for face in self._faces
+        }
+
+    def set_temperatures(self, temperatures: Mapping[str, float]) -> None:
+        """Overwrite the true face temperatures, clamped to the model's range."""
+        for face, value in temperatures.items():
+            self._node_temps[face] = _clamp(float(value), self._min_temp, self._max_temp)
+
+    @property
+    def time_constant(self) -> float:
+        return self._time_constant
+
     def set_rover_yaw(self, yaw_deg: float) -> None:
         self._rover_yaw_deg = yaw_deg
 

@@ -33,6 +33,8 @@ robots_settings:
       motor_encoder: "/Rover/motor_encoder"
       motor_effort: "/Rover/motor_effort"
       steer_encoder: "/Rover/steer_encoder"
+      wheel_speed_setpoint: "/Rover/wheel_speed_setpoint"
+      steer_angle_setpoint: "/Rover/steer_angle_setpoint"
       contact_force_front_left: "/Rover/contact_force_front_left"
       contact_force_front_right: "/Rover/contact_force_front_right"
       contact_force_mid_left: "/Rover/contact_force_mid_left"

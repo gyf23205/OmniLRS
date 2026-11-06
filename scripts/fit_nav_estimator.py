@@ -18,6 +18,8 @@ filter never sees it. Steps:
   4. torque model       least squares per wheel, one episode held out for validation
   5. replay             run the filter over every dump with the fitted config: NIS should be ~1, and
                         the spread of each residual's window mean sets the CUSUM window_sigma
+  6. odometry noise     q_odometry, so the position stays inside its 2-sigma bounds as often as a
+                        Gaussian error would (91% for both axes)
 
 Prints the fitted `estimator:` block and writes it to --out, for pasting into
 cfg/robot/perseverance.yaml. Pure numpy + pyyaml, no Isaac Sim.
@@ -374,6 +376,46 @@ def main():
     raised = {k: v for k, v in thresholds.items() if v > floor}
     print(f"  cusum thresholds raised above {floor:g} for {len(raised)} residuals: "
           + ", ".join(f"{k} {v:g}" for k, v in sorted(raised.items(), key=lambda kv: -kv[1])[:8]))
+
+    # ── 6. odometry process noise ───────────────────────────────────────────────
+    # Position is never measured, so its variance only grows, and with the white wheel noise above it
+    # grows far too slowly: slow odometry errors (terrain under each wheel, scrub, sinkage) do not
+    # average out. Their effect on position is a random walk in distance, q_odometry m^2 per metre
+    # driven per axis. Position enters no measurement, so the extra variance adds exactly,
+    # sigma_x^2(t) = P_xx(t) + q * d(t), without touching any gain or residual, and q is solved for on
+    # one replay: both position errors inside their 2-sigma bounds 0.954^2 = 91% of the time, as for
+    # independent Gaussian errors.
+    config = {**fitted, "process_noise": {**fitted["process_noise"], "q_odometry": 0.0}}
+    err_x, err_y, var_x, var_y, driven = [], [], [], [], []
+    for d in dumps:
+        robot = ReplayRobot(d)
+        drive = ReplayDrive(d, ALL_WHEELS)
+        nav = NavFilter(robot, drive, geometry, {**config, "calibration_dump": None}, steer_sign=1.0, gravity=g)
+        distance = 0.0
+        for k in range(len(d["t"])):
+            robot.k = drive.k = k
+            if k > 0:  # the first update resets the filter; every later one predicts from these speeds
+                distance += math.hypot(nav.ekf.x[M.V], nav.ekf.x[M.VLAT]) * float(d["dt"][k])
+            nav.update(float(d["dt"][k]))
+            err_x.append(nav.ekf.x[M.PX] - (d["truth.p0"][k] - d["truth.p0"][0]))
+            err_y.append(nav.ekf.x[M.PY] - (d["truth.p1"][k] - d["truth.p1"][0]))
+            var_x.append(nav.ekf.P[M.PX, M.PX])
+            var_y.append(nav.ekf.P[M.PY, M.PY])
+            driven.append(distance)
+    err_x, err_y, var_x, var_y, driven = map(np.asarray, (err_x, err_y, var_x, var_y, driven))
+
+    def coverage(q):
+        return float(np.mean((err_x ** 2 < 4 * (var_x + q * driven)) & (err_y ** 2 < 4 * (var_y + q * driven))))
+
+    target = 0.954 ** 2
+    low, high = 1e-8, 1.0
+    for _ in range(60):  # bisection in log space; coverage only grows with q
+        mid = math.sqrt(low * high)
+        low, high = (mid, high) if coverage(mid) < target else (low, mid)
+    q_odometry = float(f"{high:.3g}")
+    fitted["process_noise"] = {**fitted["process_noise"], "q_odometry": q_odometry}
+    print(f"\nodometry process noise: x, y inside 2 sigma {100 * coverage(0.0):.1f}% of the time without it; "
+          f"q_odometry {q_odometry:g} m^2/m gives {100 * coverage(q_odometry):.1f}% (target {100 * target:.1f}%)")
 
     text = yaml.safe_dump({"estimator": fitted}, sort_keys=False, default_flow_style=None)
     Path(args.out).write_text(text)

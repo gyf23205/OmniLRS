@@ -16,8 +16,10 @@ instead of the Yamcs one. The dataset's observable surface is therefore the down
 construction, and a parameter added to the rover appears in the dataset without a change here.
 
 OBSERVABLE VS ORACLE. Two files per episode. observable/ holds only what a real mission could see;
-oracle/ holds what the simulator knows and a rover never would. Three columns sit in between and are
-tagged rather than hidden - see COLUMN_NOTES.
+oracle/ holds what the simulator knows and a rover never would. How a model should use each column -
+action, observation, oracle - is the separate matter of dataset/columns.py, recorded in the manifest.
+Parameters that are constant or carry nothing usable in a dataset run (columns.DROPPED_COLUMNS) are
+not written.
 
 THE COMMS FAULT IS MISSING DATA. A dropped parameter is written as an empty cell, per parameter, the
 way PerseveranceController.transmit_to_yamcs drops it. That is the only form in which a link fault
@@ -42,24 +44,21 @@ import shutil
 import time
 from typing import Dict, List, Optional
 
+from src.mission_specific.perseverance.dataset.columns import (
+    COMMAND_COLUMNS, group_columns, is_dropped,
+)
 from src.subsystems.device import HealthState
 
 # Downlink paths that are ground truth despite being downlinked today. Recorded as oracle.
 ORACLE_PATH_PREFIXES = ("/Rover/faults/",)
 ORACLE_PATHS = ("/Rover/pose_ground_truth",)
 
-# Observable, but computed from ground truth rather than measured. A real rover would downlink the
-# same fields from its own navigation filter and would have no wheel force sensors at all, so they
-# are kept and tagged instead of being quietly promoted to oracle.
+# Observable columns a real rover would produce differently. The contact forces are the physics
+# solver's per-wheel load, averaged over the downlink interval; on the real rover they stand for
+# whichever load sensor is chosen, so they carry no noise model here.
 COLUMN_NOTES = {
-    "command_distance_remaining": "derived_from_truth",
-    "command_heading_error": "derived_from_truth",
-    "contact_force_front_left": "derived_from_truth",
-    "contact_force_front_right": "derived_from_truth",
-    "contact_force_mid_left": "derived_from_truth",
-    "contact_force_mid_right": "derived_from_truth",
-    "contact_force_rear_left": "derived_from_truth",
-    "contact_force_rear_right": "derived_from_truth",
+    f"contact_force_{wheel}": "simulated_sensor: solver force, mean over the interval, no noise model"
+    for wheel in ("front_left", "front_right", "mid_left", "mid_right", "rear_left", "rear_right")
 }
 
 # The transmitter methods that make up one downlink tick, in order. transmit_fault_state is
@@ -69,9 +68,10 @@ TICK_SEQUENCE = (
     "transmit_active_command",
     "transmit_command_progress",
     "transmit_pose_of_base_link",
-    "transmit_wheels_joint_angles",
+    "transmit_motor_encoder",
     "transmit_motor_effort",
     "transmit_steer_encoder",
+    "transmit_joint_setpoints",
     "transmit_contact_forces",
     "transmit_imu_readings",
     "transmit_estimator",
@@ -357,6 +357,10 @@ class DatasetRecorder:
 
         flat: Dict[str, object] = {}
         _flatten(_column_name(param_name), param_value, flat)
+        # Still downlinked, so still offered to the comms fault below: leaving it out of the file
+        # must not change which other parameters the link loses.
+        for name in [name for name in flat if is_dropped(name)]:
+            del flat[name]
 
         if _is_oracle(param_name):
             self._register(self._oracle_columns, flat)
@@ -627,10 +631,18 @@ class DatasetRecorder:
                 "observable": self._observable_columns,
                 "oracle": self._oracle_columns,
                 "notes": COLUMN_NOTES,
+                # The same columns by role: read "action" and "observation" for a world model.
+                # dataset/columns.py holds the rules and read_group(episode_dir, group). The
+                # command.* columns are expanded from commands.jsonl by read_group, not stored.
+                "groups": group_columns(
+                    ["time_s", "step"] + self._observable_columns + self._oracle_columns
+                    + list(COMMAND_COLUMNS)
+                ),
             },
             "layout": {
                 "observable/telemetry.csv": "one row per downlink tick; empty cell = lost to a comms fault",
-                "observable/commands.jsonl": "commands as the ground logged them; delivered=false was lost in transit",
+                "observable/commands.jsonl": "commands as the ground logged them; delivered=false was lost in transit. "
+                                             "read_group expands them into the command.* action columns",
                 "observable/images/": "downlinked nav-cam frames, possibly corrupted by a camera fault",
                 "oracle/truth.csv": "clean sensors, true pose and battery, ground-truth health",
                 "oracle/faults.jsonl": "the instant each fault took effect",
@@ -640,8 +652,9 @@ class DatasetRecorder:
                 "Seeding covers the fault RNG and the measurement-noise models, but PhysX "
                 "determinism is not configured, so episodes are reproducible in distribution "
                 "rather than bit-exactly.",
-                "Columns tagged derived_from_truth are downlinked by this rover but computed from "
-                "ground truth; drop them for a strict observability setting.",
+                "contact_force_* is the physics solver's wheel load averaged over the downlink "
+                "interval, with no noise model; it stands in for the load sensor the real rover "
+                "will carry.",
             ],
             "episode_index": episodes,
         }

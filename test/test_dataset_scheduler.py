@@ -5,7 +5,7 @@ Host-runnable checks for the dataset fault scheduler. No Isaac Sim, no omni impo
     python3 test/test_dataset_scheduler.py
 
 The properties here are the ones that decide whether the dataset is trainable at all: majority
-nominal, onsets in the middle so a transition exists to detect, overlap rare but real, and sequential
+nominal, onsets after a clean lead-in so a transition exists to detect, overlap rare but real, and sequential
 pairs that genuinely do not overlap. All of them are statistical, so they are checked over a large
 sample rather than on one schedule.
 """
@@ -77,14 +77,14 @@ check("sample-level faulted fraction is well below the episode-level one",
       0.05 <= faulted_samples < (1.0 - nominal))
 
 # ── onset placement ──────────────────────────────────────────────────────────
-print("\n=== onsets sit in the middle, so a transition exists to detect ===")
+print("\n=== onsets follow a clean lead-in, so a transition exists to detect ===")
 first_onsets = [min(fault.onset_s for fault in s.faults) for s in schedules if s.faults]
 last_onsets = [max(fault.onset_s for fault in s.faults) for s in schedules if s.faults]
-check("no fault starts in the opening fifth", min(first_onsets) >= 0.20 * DURATION - 1e-9)
-check("no fault starts in the closing fifth", max(last_onsets) <= 0.80 * DURATION + 1e-9)
-check("single-fault onsets stay inside the configured central window",
-      all(0.40 * DURATION - 1e-9 <= s.faults[0].onset_s <= 0.60 * DURATION + 1e-9
-          for s in schedules if s.episode_class == "single"))
+check("no fault starts in the first 10 s", min(first_onsets) >= 10.0 - 1e-9)
+check("no fault starts after 90% of the episode", max(last_onsets) <= 0.90 * DURATION + 1e-9)
+single_onsets = [s.faults[0].onset_s for s in schedules if s.episode_class == "single"]
+check("single-fault onsets spread across the whole window",
+      min(single_onsets) < 0.10 * DURATION and max(single_onsets) > 0.85 * DURATION)
 
 # ── recovery rules ───────────────────────────────────────────────────────────
 print("\n=== recovery: only what can actually be lifted ===")
@@ -106,8 +106,8 @@ check("the first of a sequential pair always recovers",
 
 # ── magnitudes and targets ───────────────────────────────────────────────────
 print("\n=== magnitudes stay inside the shapes the injector accepts ===")
-check("severities are in [0.3, 1.0]",
-      all(0.30 - 1e-9 <= m <= 1.0 + 1e-9
+check("severities are in [0.5, 1.0]",
+      all(0.50 - 1e-9 <= m <= 1.0 + 1e-9
           for fault in every_fault if fault.kind != "steer_stuck"
           for m in fault.magnitudes if m > 0.0))
 check("a two-mode kind never has both magnitudes zero",
@@ -172,7 +172,7 @@ check("kind weights can restrict the draw when the others are zeroed",
       all(fault.kind == "battery" for s in one_kind for fault in s.faults))
 check("merged_config leaves DEFAULTS alone",
       fs.merged_config({"severity_range": [0.9, 1.0]})["severity_range"] == [0.9, 1.0]
-      and fs.DEFAULTS["severity_range"] == [0.30, 1.00])
+      and fs.DEFAULTS["severity_range"] == [0.50, 1.00])
 
 # ── fixed schedules (--fault with --dataset-out) ─────────────────────────────
 print("\n=== fixed schedules: --fault records exactly what was asked ===")
@@ -181,8 +181,8 @@ only = fixed.faults[0] if len(fixed.faults) == 1 else None
 check("one spec gives one single-class fault with its kind, target and magnitude",
       fixed.episode_class == "single" and only is not None
       and (only.kind, only.target, only.magnitudes, only.recovery_s) == ("wheel_slip", "front_left", (0.8,), None))
-low, high = fs.DEFAULTS["onset_window"]
-check("an omitted onset lands in the onset window", low * DURATION <= only.onset_s <= high * DURATION)
+check("an omitted onset lands in the onset window",
+      fs.DEFAULTS["onset_min_s"] <= only.onset_s <= fs.DEFAULTS["onset_max"] * DURATION)
 check("an omitted onset is deterministic in the seed",
       fs.from_specs(["battery:0.5"], 3, DURATION).as_dict() == fs.from_specs(["battery:0.5"], 3, DURATION).as_dict())
 pair = fs.from_specs(["imu:0:0.5@120", "steer_stuck:ALL:-20@200"], 0, DURATION)

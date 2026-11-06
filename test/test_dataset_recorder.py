@@ -23,6 +23,9 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.mission_specific.perseverance.dataset import fault_scheduler as fs
+from src.mission_specific.perseverance.dataset.columns import (
+    COMMAND_COLUMNS, UNASSIGNED, command_columns, is_dropped, read_group,
+)
 from src.mission_specific.perseverance.dataset.recorder import DatasetRecorder, _is_oracle
 from src.mission_specific.perseverance.faults.fault_injector import FaultInjector
 from src.subsystems.device import CommonDevice, HealthState
@@ -35,6 +38,14 @@ def check(label, condition):
     print(f"  {'ok  ' if condition else 'FAIL'}  {label}")
     if not condition:
         failures.append(label)
+
+
+def _raises(function):
+    try:
+        function()
+    except ValueError:
+        return True
+    return False
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -165,14 +176,18 @@ class FakeTransmitter:
             "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
         })
 
-    def transmit_wheels_joint_angles(self):
-        self._transmit(PARAMS["motor_encoder"], [1, 2, 3, 4, 5, 6])
+    def transmit_motor_encoder(self):
+        self._transmit(PARAMS["motor_encoder"], [3.1] * 6)
 
     def transmit_motor_effort(self):
         self._transmit(PARAMS["motor_effort"], [2.5] * 6)
 
     def transmit_steer_encoder(self):
         self._transmit(PARAMS["steer_encoder"], [0.1, 0.2, 0.3, 0.4])
+
+    def transmit_joint_setpoints(self):
+        self._transmit(PARAMS["wheel_speed_setpoint"], [1.1] * 6)
+        self._transmit(PARAMS["steer_angle_setpoint"], [5.0, 5.0, -5.0, -5.0])
 
     def transmit_contact_forces(self):
         for name in ("front_left", "front_right", "mid_left", "mid_right", "rear_left", "rear_right"):
@@ -291,6 +306,7 @@ expected_observable = {
     path[len("/Rover/"):].replace("/", ".")
     for path in PARAMS.values() if not _is_oracle(path)
 }
+expected_observable = {name for name in expected_observable if not (is_dropped(name) or is_dropped(name + ".0"))}
 # The fake emits every parameter except the fault ones, which the recorder assembles itself.
 missing = {name for name in expected_observable if not any(
     column == name or column.startswith(name + ".") for column in observable_columns)}
@@ -309,6 +325,10 @@ check("arrays are flattened by index",
 check("measured drive effort is an observable column, one per wheel",
       {"motor_effort.0", "motor_effort.5"} <= observable_columns and
       "motor_effort.6" not in observable_columns)
+check("joint setpoints are observable columns, one per joint",
+      {"wheel_speed_setpoint.0", "wheel_speed_setpoint.5",
+       "steer_angle_setpoint.0", "steer_angle_setpoint.3"} <= observable_columns and
+      "steer_angle_setpoint.4" not in observable_columns)
 check("sinkage is an oracle column", "oracle.wheel_sinkage.5" in oracle_columns)
 
 print("\n=== the oracle carries what a mission never could ===")
@@ -462,12 +482,114 @@ check("sample-level balance is reported and lower than the episode level",
       0.0 < manifest["class_balance"]["sample_level_faulted_fraction"] < 0.5)
 check("columns are listed for both tiers",
       manifest["columns"]["observable"] and manifest["columns"]["oracle"])
-check("the derived_from_truth columns are tagged",
-      "command_heading_error" in manifest["columns"]["notes"] and
-      "contact_force_mid_left" in manifest["columns"]["notes"])
-check("every tagged column actually exists in the observable file",
+check("the contact forces carry a note that they are an exact simulated sensor",
+      set(manifest["columns"]["notes"]) == {f"contact_force_{w}" for w in
+                                           ("front_left", "front_right", "mid_left", "mid_right",
+                                            "rear_left", "rear_right")})
+check("every noted column actually exists in the observable file",
       set(manifest["columns"]["notes"]) <= set(manifest["columns"]["observable"]))
 check("the determinism caveat is stated", any("PhysX" in note for note in manifest["caveats"]))
+check("columns constant by construction are never written",
+      not {"active_command", "go_nogo"} & set(manifest["columns"]["observable"])
+      and "active_command" not in read_csv(Path(tmp_manifest) / "episodes/ep_0000/observable/telemetry.csv"))
+
+print("\n=== columns are grouped by role ===")
+groups = manifest["columns"]["groups"]
+grouped = [column for columns in groups.values() for column in columns]
+check("every column is in exactly one group",
+      sorted(grouped) == sorted(set(["time_s", "step"] + manifest["columns"]["observable"]
+                                    + manifest["columns"]["oracle"] + list(COMMAND_COLUMNS))))
+check("no column is left unassigned", groups[UNASSIGNED] == [])
+check("the groups are the four roles plus index, estimator and oracle",
+      list(groups) == ["index", "control_action", "other_action", "dynamics_observation",
+                       "other_observation", "estimator", "oracle", UNASSIGNED])
+check("obc_uptime is an index column", groups["index"] == ["time_s", "step", "obc_uptime"])
+check("measured wheel speed is not mistaken for the setpoint",
+      "motor_encoder.0" not in groups["control_action"] and "wheel_speed_setpoint.0" not in groups["dynamics_observation"])
+check("control actions are exactly the joint setpoints",
+      groups["control_action"] == [f"wheel_speed_setpoint.{i}" for i in range(6)]
+      + [f"steer_angle_setpoint.{i}" for i in range(4)])
+check("other actions are every expanded ground command",
+      groups["other_action"] == list(COMMAND_COLUMNS))
+check("torque, wheel loads, wheel speed, joints and IMU are dynamics observations",
+      {"motor_effort.0", "contact_force_mid_left", "motor_encoder.5", "steer_encoder.3",
+       "imu_gyroscope.gz", "imu_orientation.pitch"} <= set(groups["dynamics_observation"]))
+check("power, thermal, avionics and software state are other observations",
+      {"motor_current.0", "battery_voltage", "temperature_top", "radio_rssi", "obc_state",
+       "command_status"} <= set(groups["other_observation"])
+      and "motor_current.0" not in groups["dynamics_observation"])
+check("the goto target and the truth-derived progress fields are oracle",
+      {"command_target.x", "command_target.y", "command_distance_remaining",
+       "command_heading_error"} <= set(groups["oracle"]))
+check("no oracle-file column is an action or observation",
+      not (set(manifest["columns"]["oracle"]) - {"time_s", "step"})
+      & set(groups["control_action"] + groups["other_action"]
+            + groups["dynamics_observation"] + groups["other_observation"]))
+check("the estimator is its own group",
+      groups["estimator"] and all(c.startswith("estimator.") for c in groups["estimator"]))
+
+episode_dir = str(Path(tmp_manifest) / "episodes/ep_0001")
+control = read_group(episode_dir, "control_action")
+other = read_group(episode_dir, "other_action")
+check("read_group returns each action group, one value per tick",
+      list(control) == groups["control_action"] and list(other) == groups["other_action"]
+      and all(len(v) == 10 for v in list(control.values()) + list(other.values())))
+check("an episode with no commands reads as idle with the start-of-episode housekeeping",
+      other["command.drive_straight.distance"].sum() == 0 and other["command.type.goto"].sum() == 0
+      and (other["command.power.CAMERA"] == 1).all() and (other["command.solar_panel_deployed"] == 1).all())
+check("action values are the downlinked numbers", control["wheel_speed_setpoint.0"][0] == 1.1)
+check("read_group reaches into the oracle file",
+      "oracle.fault_active" in read_group(episode_dir, "oracle"))
+check("text columns come back as text", read_group(episode_dir, "oracle")["oracle.active_faults"].dtype == object)
+check("an unknown group is refused", _raises(lambda: read_group(episode_dir, "actions")))
+
+print("\n=== commands become per-tick action columns ===")
+steps = [0, 31, 62, 93, 124, 155]
+log = [
+    {"time_s": 0.5, "step": 15, "command": "goto", "arguments": {"x": 3.0, "y": -1.0}, "delivered": True},
+    {"time_s": 0.6, "step": 18, "command": None, "status": "aborted"},
+    {"time_s": 1.5, "step": 45, "command": "power_electronics",
+     "arguments": {"subsystem_id": "CAMERA", "power_state": "OFF"}, "delivered": True},
+    {"time_s": 1.6, "step": 50, "command": "deploy_solar_panel",
+     "arguments": {"deployment": "STOWED"}, "delivered": True},
+    {"time_s": 3.0, "step": 93, "command": "drive_turn",
+     "arguments": {"angular_velocity": -15.0, "angle": 90.0}, "delivered": False},
+    {"time_s": 6.0, "step": 200, "command": "stop", "arguments": {}, "delivered": True},
+]
+c = command_columns(log, steps)
+check("exactly the chosen command columns are produced",
+      list(c) == [f"command.type.{t}" for t in ("goto", "drive_straight", "drive_turn")]
+      + ["command.drive_straight.linear_velocity", "command.drive_straight.distance",
+                  "command.drive_turn.angular_velocity", "command.drive_turn.angle"]
+      + [f"command.power.{d}" for d in ("MOTOR_CONTROLLER", "CAMERA")]
+      + ["command.solar_panel_deployed"]
+      and list(c) == list(COMMAND_COLUMNS))
+check("a command lands on the first tick at or after its step and is held",
+      list(c["command.drive_turn.angle"]) == [0, 0, 0, 90, 90, 90]
+      and list(c["command.drive_turn.angular_velocity"]) == [0, 0, 0, -15, -15, -15])
+check("a sent command after the last tick is dropped", c["command.drive_turn.angle"][-1] == 90)
+check("an undelivered command still counts: the ground sent it", c["command.drive_turn.angle"][3] == 90)
+check("housekeeping is held alongside the drive goal",
+      list(c["command.power.CAMERA"]) == [1, 1, 0, 0, 0, 0] and (c["command.power.MOTOR_CONTROLLER"] == 1).all()
+      and list(c["command.solar_panel_deployed"]) == [1, 1, 0, 0, 0, 0])
+replaced = command_columns([
+    {"step": 0, "command": "drive_straight", "arguments": {"linear_velocity": 0.2, "distance": 5.0}},
+    {"step": 62, "command": "goto", "arguments": {"x": 1.0, "y": 1.0}},
+    {"step": 93, "command": "drive_turn", "arguments": {"angular_velocity": 10.0, "angle": 45.0}},
+    {"step": 124, "command": "stop", "arguments": {}},
+], steps)
+check("a goto or stop has no argument columns but clears the previous drive arguments",
+      list(replaced["command.drive_straight.distance"]) == [5, 5, 0, 0, 0, 0]
+      and list(replaced["command.drive_turn.angle"]) == [0, 0, 0, 45, 0, 0])
+check("command.type is a one-hot of the held drive command, all zero before the first and after a stop",
+      [[replaced[f"command.type.{t}"][k] for t in ("goto", "drive_straight", "drive_turn")]
+       for k in range(6)] == [[0, 1, 0], [0, 1, 0], [1, 0, 0], [0, 0, 1], [0, 0, 0], [0, 0, 0]]
+      and list(c["command.type.goto"]) == [0, 1, 1, 0, 0, 0])
+check("a power command to a device without a column is refused",
+      _raises(lambda: command_columns([{"step": 0, "command": "power_electronics",
+                                        "arguments": {"subsystem_id": "RADIO", "power_state": "OFF"}}], steps)))
+check("a command with no columns is refused",
+      _raises(lambda: command_columns([{"step": 0, "command": "go_nogo", "arguments": {}}], steps)))
 
 # ── header stability ─────────────────────────────────────────────────────────
 print("\n=== the header is the union, so a parameter lost on tick 1 is not lost forever ===")

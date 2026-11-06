@@ -63,19 +63,19 @@ def profile(t):
 
 
 def simulate(duration=60.0, seed=1, gyro_bias=lambda t: 0.0, wheel_scale=lambda t, name: 1.0,
-             v_lat_profile=lambda t: 0.0, accel_bias=0.0, roll=0.0):
+             v_lat_profile=lambda t: 0.0, accel_bias=0.0, roll=0.0, q_odometry=0.0):
     """Run the filter over a synthetic drive; return per-step logs."""
     rng = np.random.default_rng(seed)
     # Q matched to this generator: smooth steering on flat ground (the defaults are fitted to the
     # rougher simulator terrain and would overstate the uncertainty here).
-    ekf = NavEKF(POSITIONS, M.ProcessNoise(sigma_accel=SIGMA_ACCEL, q_omega=3e-4, q_heading=1e-6), NOISE,
-                 gravity=GRAVITY)
+    ekf = NavEKF(POSITIONS, M.ProcessNoise(sigma_accel=SIGMA_ACCEL, q_omega=3e-4, q_heading=1e-6,
+                                           q_odometry=q_odometry), NOISE, gravity=GRAVITY)
     heading0 = 0.4
     ekf.reset(heading=heading0)
 
     psi, px, py = heading0, 0.0, 0.0
     logs = {"t": [], "rolling": [], "sideslip": [], "gyro": [], "heading": [], "lateral": [],
-            "state": [], "truth": []}
+            "state": [], "truth": [], "P": []}
     steps = int(duration / DT)
     for k in range(steps):
         t = k * DT
@@ -125,11 +125,13 @@ def simulate(duration=60.0, seed=1, gyro_bias=lambda t: 0.0, wheel_scale=lambda 
         logs["gyro"].append(gyro_inn)
         logs["heading"].append(head_inn)
         logs["state"].append(ekf.x.copy())
+        logs["P"].append(ekf.P.copy())
         logs["truth"].append(truth)
     logs["t"] = np.array(logs["t"])
     logs["lateral"] = np.array(logs["lateral"])
     logs["state"] = np.array(logs["state"])
     logs["truth"] = np.array(logs["truth"])
+    logs["P"] = np.array(logs["P"])
     return logs
 
 
@@ -222,6 +224,29 @@ active = window(logs, 5.0, 60.0)
 bad = wheel_normalized(logs, "front_left", active, "sideslip")
 others = max(abs(wheel_normalized(logs, n, active, "sideslip").mean()) for n in ALL_WHEELS if n != "front_left")
 check(f"front_left side-slip innovation mean {bad.mean():+.1f} sigma, others worst {others:.2f}", abs(bad.mean()) > 3.0 and others < 1.0)
+
+print("Odometry process noise: widens the position uncertainty only")
+Q_ODOMETRY = 0.004
+base, wide = simulate(), simulate(q_odometry=Q_ODOMETRY)
+same = all(
+    np.allclose([i.nu for i in base[kind]], [i.nu for i in wide[kind]], rtol=0, atol=1e-12)
+    and np.allclose([i.S for i in base[kind]], [i.S for i in wide[kind]], rtol=0, atol=1e-12)
+    for kind in ("gyro", "heading"))
+same = same and all(
+    np.allclose([step[n].nu for step in base[kind]], [step[n].nu for step in wide[kind]], rtol=0, atol=1e-12)
+    and np.allclose([step[n].S for step in base[kind]], [step[n].S for step in wide[kind]], rtol=0, atol=1e-12)
+    for kind in ("rolling", "sideslip") for n in ALL_WHEELS)
+check("every residual and its variance unchanged", same)
+check("state estimate unchanged", np.allclose(base["state"], wide["state"], rtol=0, atol=1e-12))
+# Predict k uses the speeds the step starts with: the reset state (at rest) for the first one.
+speeds = np.vstack([np.zeros(M.STATE_DIM), wide["state"][:-1]])
+driven = float(np.sum(np.hypot(speeds[:, M.V], speeds[:, M.VLAT]) * DT))
+added = wide["P"][-1, M.PX, M.PX] - base["P"][-1, M.PX, M.PX]
+check(f"position variance grew by {added:.4f} m^2 = q_odometry x {driven:.1f} m driven",
+      abs(added - Q_ODOMETRY * driven) < 1e-9)
+other = [i for i in range(M.STATE_DIM) if i not in (M.PX, M.PY)]
+check("variance of every other state unchanged",
+      np.allclose(base["P"][:, other][:, :, other], wide["P"][:, other][:, :, other], rtol=0, atol=1e-12))
 
 print()
 if failures:

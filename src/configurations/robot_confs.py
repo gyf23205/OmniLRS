@@ -45,6 +45,9 @@ class RobotParameters:
     dataset: Dict = field(default_factory=dict)
     # Onboard navigation EKF: imu axis map, noise, torque model, cusum. See estimation/nav_filter.py.
     estimator: Dict = field(default_factory=dict)
+    # Physics overrides applied to the robot's usd before PhysX parses it (articulation sleep, link
+    # masses, free and mimic joints) and per-step contact averaging. See Robot.install_physics_overrides.
+    physics: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.usd_path = os.path.join(os.getcwd(), self.usd_path)
